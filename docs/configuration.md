@@ -113,6 +113,8 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `tmux.max_panel_panes` | integer | `8` | Legacy alias for `multiplexer.max_panel_panes`（`1-8`） |
 | `tmux.panel_rows_per_column` | integer | `3` | Legacy alias for `multiplexer.panel_rows_per_column` |
 | `sessionManager.maxSessionsPerAgent` | integer | `2` | Maximum remembered resumable child sessions per specialist type in the current orchestrator session (1–10). See [Session Management](session-management.md) |
+| `sessionManager.readContextMinLines` | integer | `10` | Minimum number of lines read from a file before it appears in resumable-session context (0–1000) |
+| `sessionManager.readContextMaxFiles` | integer | `8` | Maximum number of recent read-context files shown per remembered child session (0–50) |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
 | `fallback.enabled` | boolean | `false` | Enable model failover on timeout/error |
 | `fallback.timeoutMs` | number | `15000` | Time before aborting and trying next model |
@@ -179,8 +181,9 @@ automatically.
 
 Session management is enabled by default and does not need to be present in the
 starter config. Add `sessionManager` only if you want to tune how many resumable
-child-agent sessions are remembered. See [Session Management](session-management.md)
-for the concept, defaults, and examples.
+child-agent sessions are remembered or how much read context is shown. See
+[Session Management](session-management.md) for the concept, defaults, and
+examples.
 
 ### Agent Display Names
 

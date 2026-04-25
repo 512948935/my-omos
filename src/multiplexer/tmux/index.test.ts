@@ -530,12 +530,12 @@ describe('TmuxMultiplexer.findBinary', () => {
     );
     expect(orientations).toEqual(['h', 'v', 'h', 'h', 'v', 'v', 'v', 'v']);
 
-    // [CUSTOM] Post-田字 vertical expansion follows row-first order.
+    // [CUSTOM] Post-田字 vertical expansion prioritizes right column first.
     const splitTargets = splitCalls.map((call) => {
       const targetIndex = call.indexOf('-t');
       return targetIndex >= 0 ? call[targetIndex + 1] : null;
     });
-    expect(splitTargets.slice(4, 8)).toEqual(['%1', '%3', '%2', '%4']);
+    expect(splitTargets.slice(4, 8)).toEqual(['%3', '%1', '%4', '%2']);
 
     // First split is strict 1/2 left-right.
     expect(splitCalls[0]).toContain('-p');
@@ -618,17 +618,188 @@ describe('TmuxMultiplexer.findBinary', () => {
       'v',
     ]);
 
-    // [CUSTOM] 5~8 阶段按行优先目标顺序扩展。
+    // [CUSTOM] 5~8 阶段优先右列目标顺序扩展。
     const splitTargets = splitCalls.map((call) => {
       const targetIndex = call.indexOf('-t');
       return targetIndex >= 0 ? call[targetIndex + 1] : null;
     });
     expect(splitTargets.slice(4, 8)).toEqual([
-      '%1',
       '%3',
-      '%2',
+      '%1',
       '%4',
+      '%2',
     ]);
+  });
+
+  test('uses live geometry when right-binary tracked order is stale', async () => {
+    const commandLog: string[][] = [];
+
+    // [CUSTOM] Simulate geometry lookup + split for stale-order recovery.
+    crossSpawnMock.mockImplementation((command: string[]) => {
+      commandLog.push(command);
+      const [cmd, arg] = command;
+
+      if (cmd === 'which' && arg === 'tmux') {
+        return createProcess(0, '/usr/bin/tmux\n');
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === '-V') {
+        return createProcess(0, 'tmux 3.4\n');
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'split-window') {
+        return createProcess(0, '%new-pane\n');
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'select-pane') {
+        return createProcess();
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'list-panes') {
+        return createProcess(
+          0,
+          [
+            '%tl\t0\t0\t50\t20',
+            '%bl\t0\t21\t50\t20',
+            '%tr\t51\t0\t50\t20',
+            '%br\t51\t21\t50\t20',
+          ].join('\n') + '\n',
+        );
+      }
+
+      throw new Error(`Unexpected command: ${command.join(' ')}`);
+    });
+
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const multiplexer = new TmuxMultiplexer('right-binary-8', 60, 3, 8) as any;
+
+    // [CUSTOM] Inject stale order: [TR, BR, TL, BL].
+    multiplexer.binaryPaneIds = ['%tr', '%br', '%tl', '%bl'];
+    multiplexer.openPanelPaneCount = 4;
+    multiplexer.statusHiddenByPlugin = true;
+
+    const result = await multiplexer.spawnPane(
+      'rb-5',
+      'Worker 5',
+      'http://localhost:4096',
+      '/tmp/workspace',
+    );
+
+    expect(result.success).toBe(true);
+
+    const splitCall = commandLog.find(
+      ([bin, sub]) => bin === '/usr/bin/tmux' && sub === 'split-window',
+    );
+    expect(splitCall).toBeDefined();
+    expect(splitCall).toContain('-v');
+    expect(splitCall).toContain('-t');
+    // [CUSTOM] count=4 时应优先切分 TR，而不是受 stale 顺序影响。
+    expect(splitCall).toContain('%tr');
+  });
+
+  test('does not over-decrement right-binary after duplicate close', async () => {
+    const commandLog: string[][] = [];
+    let paneCounter = 0;
+    const killedPaneIds = new Set<string>();
+
+    // [CUSTOM] Simulate duplicate close where second kill-pane fails.
+    crossSpawnMock.mockImplementation((command: string[]) => {
+      commandLog.push(command);
+      const [cmd, arg] = command;
+
+      if (cmd === 'which' && arg === 'tmux') {
+        return createProcess(0, '/usr/bin/tmux\n');
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === '-V') {
+        return createProcess(0, 'tmux 3.4\n');
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'show-options') {
+        return createProcess(0, 'on\n');
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'set-option') {
+        return createProcess();
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'split-window') {
+        paneCounter += 1;
+        return createProcess(0, `%${paneCounter}\n`);
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'select-pane') {
+        return createProcess();
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'send-keys') {
+        return createProcess();
+      }
+
+      if (cmd === '/usr/bin/tmux' && arg === 'kill-pane') {
+        const targetIndex = command.indexOf('-t');
+        const targetPane =
+          targetIndex >= 0 ? command[targetIndex + 1] ?? '' : '';
+
+        if (!killedPaneIds.has(targetPane)) {
+          killedPaneIds.add(targetPane);
+          return createProcess();
+        }
+
+        return createProcess(1, '', 'pane not found');
+      }
+
+      throw new Error(`Unexpected command: ${command.join(' ')}`);
+    });
+
+    const { TmuxMultiplexer } = await importFreshTmux();
+    const multiplexer = new TmuxMultiplexer('right-binary-8', 60, 3, 8);
+
+    const initialSpawns = await Promise.all(
+      Array.from({ length: 4 }, (_, index) =>
+        multiplexer.spawnPane(
+          `rb-${index + 1}`,
+          `Worker ${index + 1}`,
+          'http://localhost:4096',
+          '/tmp/workspace',
+        ),
+      ),
+    );
+
+    const firstPaneId = initialSpawns[0]?.paneId;
+    expect(firstPaneId).toBe('%1');
+
+    const firstClose = await multiplexer.closePane(firstPaneId as string);
+    const secondClose = await multiplexer.closePane(firstPaneId as string);
+
+    expect(firstClose).toBe(true);
+    expect(secondClose).toBe(false);
+
+    const fifth = await multiplexer.spawnPane(
+      'rb-5',
+      'Worker 5',
+      'http://localhost:4096',
+      '/tmp/workspace',
+    );
+    const sixth = await multiplexer.spawnPane(
+      'rb-6',
+      'Worker 6',
+      'http://localhost:4096',
+      '/tmp/workspace',
+    );
+
+    expect(fifth.success).toBe(true);
+    expect(sixth.success).toBe(true);
+
+    const splitCalls = commandLog.filter(
+      ([cmd, sub]) => cmd === '/usr/bin/tmux' && sub === 'split-window',
+    );
+    const orientations = splitCalls.map((call) =>
+      call.includes('-h') ? 'h' : 'v',
+    );
+
+    // [CUSTOM] duplicate close 不应让计数少减；后续应为先补 2x2 再进入纵向扩展。
+    expect(orientations.slice(4, 6)).toEqual(['h', 'v']);
   });
 
   test('hides status bar on first panel and restores after last close', async () => {

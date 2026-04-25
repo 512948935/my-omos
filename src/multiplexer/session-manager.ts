@@ -46,6 +46,7 @@ interface SessionEvent {
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const SESSION_MISSING_GRACE_MS = POLL_INTERVAL_BACKGROUND_MS * 3;
 const RIGHT_BINARY_LAYOUT = 'right-binary-8' as const;
+const RIGHT_BINARY_REBALANCE_WAIT_MS = 15;
 
 /**
  * Tracks child sessions and spawns/closes multiplexer panes for them.
@@ -62,6 +63,8 @@ export class MultiplexerSessionManager {
   private sessions = new Map<string, TrackedSession>();
   private knownSessions = new Map<string, KnownSession>();
   private spawningSessions = new Set<string>();
+  // [CUSTOM] Deduplicate concurrent close requests for the same session.
+  private closingSessions = new Set<string>();
   // [CUSTOM] Queue sessions waiting for pane capacity.
   private pendingQueue: string[] = [];
   private pendingSessionIds = new Set<string>();
@@ -237,30 +240,54 @@ export class MultiplexerSessionManager {
   }
 
   private async closeSession(sessionId: string): Promise<void> {
-    const tracked = this.sessions.get(sessionId);
-    if (!tracked || !this.multiplexer) return;
-
-    log('[multiplexer-session-manager] closing session pane', {
-      sessionId,
-      paneId: tracked.paneId,
-    });
-
-    await this.multiplexer.closePane(tracked.paneId);
-    this.sessions.delete(sessionId);
-
-    // [CUSTOM] right-binary 布局在 pane 数变化后需要重算并重排。
-    await this.rebalanceRightBinaryLayoutIfNeeded();
-
-    if (this.sessions.size === 0) {
-      this.stopPolling();
+    if (this.closingSessions.has(sessionId)) {
+      return;
     }
 
-    await this.drainPendingQueue();
+    this.closingSessions.add(sessionId);
+
+    try {
+      // [CUSTOM] 等待 right-binary 重排完成，避免使用重排中的过期 paneId。
+      await this.waitForRightBinaryRebalance();
+
+      const tracked = this.sessions.get(sessionId);
+      if (!tracked || !this.multiplexer) return;
+
+      log('[multiplexer-session-manager] closing session pane', {
+        sessionId,
+        paneId: tracked.paneId,
+      });
+
+      await this.multiplexer.closePane(tracked.paneId);
+      this.sessions.delete(sessionId);
+
+      // [CUSTOM] right-binary 布局在 pane 数变化后需要重算并重排。
+      await this.rebalanceRightBinaryLayoutIfNeeded();
+
+      if (this.sessions.size === 0) {
+        this.stopPolling();
+      }
+
+      await this.drainPendingQueue();
+    } finally {
+      this.closingSessions.delete(sessionId);
+    }
   }
 
   // [CUSTOM] Whether we should rebuild pane placement for right-binary mode.
   private shouldRebalanceRightBinaryLayout(): boolean {
     return this.multiplexerLayout === RIGHT_BINARY_LAYOUT;
+  }
+
+  // [CUSTOM] Block churn handling until right-binary rebalance finishes.
+  private async waitForRightBinaryRebalance(): Promise<void> {
+    if (!this.shouldRebalanceRightBinaryLayout()) return;
+
+    while (this.rebalancingRightBinaryLayout) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, RIGHT_BINARY_REBALANCE_WAIT_MS),
+      );
+    }
   }
 
   // [CUSTOM] Rebuild remaining right-binary panes to keep equal splits.
@@ -352,6 +379,9 @@ export class MultiplexerSessionManager {
     known: KnownSession,
     trigger: 'created' | 'busy' | 'queue',
   ): Promise<SpawnAttemptResult> {
+    // [CUSTOM] 等待 right-binary 重排完成，避免重排与新增 pane 交错。
+    await this.waitForRightBinaryRebalance();
+
     if (!this.multiplexer) return 'skipped';
     if (this.isTrackedOrSpawning(sessionId)) return 'skipped';
 
@@ -554,6 +584,7 @@ export class MultiplexerSessionManager {
 
     this.knownSessions.clear();
     this.spawningSessions.clear();
+    this.closingSessions.clear();
     this.pendingQueue = [];
     this.pendingSessionIds.clear();
     this.drainingPendingQueue = false;

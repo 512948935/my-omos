@@ -1,15 +1,31 @@
 import type { AgentName } from '../config';
 
+export interface ContextFile {
+  path: string;
+  lineCount: number;
+  lineNumbers?: number[];
+  lastReadAt: number;
+}
+
 export interface RememberedTaskSession {
   alias: string;
   taskId: string;
   agentType: AgentName;
   label: string;
+  contextFiles: ContextFile[];
   createdAt: number;
   lastUsedAt: number;
 }
 
 type SessionGroupMap = Map<AgentName, RememberedTaskSession[]>;
+
+const MIN_CONTEXT_FILE_LINES = 10;
+const MAX_CONTEXT_FILES_PER_SESSION = 8;
+
+interface SessionManagerOptions {
+  readContextMinLines?: number;
+  readContextMaxFiles?: number;
+}
 
 function aliasPrefix(agentType: AgentName): string {
   switch (agentType) {
@@ -62,6 +78,8 @@ export function deriveTaskSessionLabel(input: {
 
 export class SessionManager {
   private readonly maxSessionsPerAgent: number;
+  private readonly readContextMinLines: number;
+  private readonly readContextMaxFiles: number;
   private readonly sessionsByParent = new Map<string, SessionGroupMap>();
   private readonly nextAliasIndexByParent = new Map<
     string,
@@ -69,8 +87,15 @@ export class SessionManager {
   >();
   private orderCounter = 0;
 
-  constructor(maxSessionsPerAgent: number) {
+  constructor(
+    maxSessionsPerAgent: number,
+    options: SessionManagerOptions = {},
+  ) {
     this.maxSessionsPerAgent = maxSessionsPerAgent;
+    this.readContextMinLines =
+      options.readContextMinLines ?? MIN_CONTEXT_FILE_LINES;
+    this.readContextMaxFiles =
+      options.readContextMaxFiles ?? MAX_CONTEXT_FILES_PER_SESSION;
   }
 
   remember(input: {
@@ -101,6 +126,7 @@ export class SessionManager {
       taskId: input.taskId,
       agentType: input.agentType,
       label: input.label,
+      contextFiles: [],
       createdAt: now,
       lastUsedAt: now,
     };
@@ -145,6 +171,46 @@ export class SessionManager {
     }
   }
 
+  taskIds(): Set<string> {
+    const ids = new Set<string>();
+    for (const groups of this.sessionsByParent.values()) {
+      for (const group of groups.values()) {
+        for (const entry of group) {
+          ids.add(entry.taskId);
+        }
+      }
+    }
+    return ids;
+  }
+
+  addContext(taskId: string, files: ContextFile[]): void {
+    if (files.length === 0) return;
+
+    for (const groups of this.sessionsByParent.values()) {
+      for (const group of groups.values()) {
+        const match = group.find((entry) => entry.taskId === taskId);
+        if (!match) continue;
+
+        const existing = new Map(
+          match.contextFiles.map((file) => [file.path, file]),
+        );
+        for (const file of files) {
+          const previous = existing.get(file.path);
+          if (previous) {
+            previous.lineCount = Math.max(previous.lineCount, file.lineCount);
+            previous.lastReadAt = Math.max(
+              previous.lastReadAt,
+              file.lastReadAt,
+            );
+            continue;
+          }
+          match.contextFiles.push({ ...file });
+        }
+        this.trimContextFiles(match);
+      }
+    }
+  }
+
   clearParent(parentSessionId: string): void {
     this.sessionsByParent.delete(parentSessionId);
     this.nextAliasIndexByParent.delete(parentSessionId);
@@ -164,11 +230,28 @@ export class SessionManager {
       )
       .filter(([, entries]) => entries.length > 0)
       .sort((a, b) => b[1][0].lastUsedAt - a[1][0].lastUsedAt)
-      .map(
-        ([agentType, entries]) =>
+      .map(([agentType, entries]) =>
+        [
           `- ${agentType}: ${entries
             .map((entry) => `${entry.alias} ${entry.label}`)
             .join('; ')}`,
+          ...entries
+            .map(
+              (entry) =>
+                [
+                  entry,
+                  formatContextFiles(entry.contextFiles, {
+                    minLines: this.readContextMinLines,
+                    maxFiles: this.readContextMaxFiles,
+                  }),
+                ] as const,
+            )
+            .filter(([, context]) => context.length > 0)
+            .map(
+              ([entry, context]) =>
+                `  Context read by ${entry.alias}: ${context}`,
+            ),
+        ].join('\n'),
       );
 
     if (lines.length === 0) return undefined;
@@ -240,8 +323,35 @@ export class SessionManager {
     }
   }
 
+  private trimContextFiles(entry: RememberedTaskSession): void {
+    if (this.readContextMaxFiles === 0) {
+      entry.contextFiles = [];
+      return;
+    }
+
+    entry.contextFiles = entry.contextFiles
+      .filter((file) => file.lineCount >= this.readContextMinLines)
+      .sort((a, b) => b.lastReadAt - a.lastReadAt)
+      .slice(0, this.readContextMaxFiles + 1);
+  }
+
   private nextOrder(): number {
     this.orderCounter += 1;
     return this.orderCounter;
   }
+}
+
+function formatContextFiles(
+  files: ContextFile[],
+  options: { minLines: number; maxFiles: number },
+): string {
+  const eligible = files
+    .filter((file) => file.lineCount >= options.minLines)
+    .sort((a, b) => b.lastReadAt - a.lastReadAt);
+  const shown = eligible.slice(0, options.maxFiles);
+  const rest = eligible.length - shown.length;
+  const rendered = shown.map(
+    (file) => `${file.path} (${file.lineCount} lines)`,
+  );
+  return `${rendered.join(', ')}${rest > 0 ? ` (+${rest} more)` : ''}`;
 }

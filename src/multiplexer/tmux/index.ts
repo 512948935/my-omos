@@ -22,6 +22,14 @@ const TMUX_MAX_PANEL_PANES_HARD_LIMIT = 8;
 // [CUSTOM] Right-binary layout always uses even 1/2 splits.
 const TMUX_BINARY_SPLIT_PERCENT = 50;
 
+interface BinaryPaneGeometry {
+  paneId: string;
+  left: number;
+  top: number;
+  width: number;
+  height: number;
+}
+
 export class TmuxMultiplexer implements Multiplexer {
   readonly type = 'tmux' as const;
 
@@ -100,13 +108,14 @@ export class TmuxMultiplexer implements Multiplexer {
     const paneResult = await this.enqueueMutation<PaneResult>(async () => {
       // [CUSTOM] Retry hide until it actually succeeds in tmux.
       const shouldEnsureStatusHidden = !this.statusHiddenByPlugin;
-      const splitPlan = this.buildSplitPlan();
 
       try {
+        const activePanelPaneCount = this.currentPanelPaneCount();
+
         // [CUSTOM] Cap panel capacity based on active layout strategy.
-        if (this.openPanelPaneCount >= this.maxPanelPanes()) {
+        if (activePanelPaneCount >= this.maxPanelPanes()) {
           log('[tmux] spawnPane: panel capacity reached, skipping pane spawn', {
-            openPanelPaneCount: this.openPanelPaneCount,
+            openPanelPaneCount: activePanelPaneCount,
             maxPanelPanes: this.maxPanelPanes(),
             panelRowsPerColumn: this.panelRowsPerColumn,
           });
@@ -117,6 +126,8 @@ export class TmuxMultiplexer implements Multiplexer {
         if (shouldEnsureStatusHidden) {
           await this.hideStatusBarNow(tmux);
         }
+
+        const splitPlan = await this.buildSplitPlan(tmux);
 
         // Build the attach command
         const quotedDirectory = quoteShellArg(directory);
@@ -136,11 +147,11 @@ export class TmuxMultiplexer implements Multiplexer {
         if (!splitPlan) {
           log('[tmux] spawnPane: unable to resolve split target for column', {
             layout: this.storedLayout,
-            openPanelPaneCount: this.openPanelPaneCount,
+            openPanelPaneCount: this.currentPanelPaneCount(),
             paneIdsByColumn: this.paneIdsByColumn,
             binaryPaneIds: this.binaryPaneIds,
           });
-          if (this.openPanelPaneCount === 0) {
+          if (this.currentPanelPaneCount() === 0) {
             await this.restoreStatusBarNow(tmux);
           }
           return { success: false, reason: 'error' };
@@ -191,13 +202,13 @@ export class TmuxMultiplexer implements Multiplexer {
         }
 
         // [CUSTOM] If no panel exists after failure, restore status bar.
-        if (this.openPanelPaneCount === 0) {
+        if (this.currentPanelPaneCount() === 0) {
           await this.restoreStatusBarNow(tmux);
         }
 
         return { success: false, reason: 'error' };
       } catch (err) {
-        if (this.openPanelPaneCount === 0) {
+        if (this.currentPanelPaneCount() === 0) {
           await this.restoreStatusBarNow(tmux);
         }
         log('[tmux] spawnPane: exception', { error: String(err) });
@@ -228,11 +239,20 @@ export class TmuxMultiplexer implements Multiplexer {
     let paneCountAdjusted = false;
 
     const closed = await this.enqueueMutation(async () => {
-      const unregisterTrackedPane = () => {
+      const unregisterTrackedPane = (allowFallback: boolean) => {
         const removed = this.untrackPanelPane(paneId);
         if (removed) {
           paneCountAdjusted = true;
           return true;
+        }
+
+        if (!allowFallback) {
+          return false;
+        }
+
+        if (this.storedLayout === 'right-binary-8') {
+          // [CUSTOM] right-binary 依赖 paneId 列表，不做盲目计数回退。
+          return false;
         }
 
         if (this.openPanelPaneCount > 0) {
@@ -270,9 +290,9 @@ export class TmuxMultiplexer implements Multiplexer {
         log('[tmux] closePane: result', { exitCode, stderr: stderr.trim() });
 
         if (exitCode === 0) {
-          unregisterTrackedPane();
+          unregisterTrackedPane(true);
 
-          if (this.openPanelPaneCount === 0) {
+          if (this.currentPanelPaneCount() === 0) {
             // [CUSTOM] Restore status bar after the last panel closes.
             await this.restoreStatusBarNow(tmux);
           }
@@ -285,18 +305,20 @@ export class TmuxMultiplexer implements Multiplexer {
           paneId,
         });
 
-        unregisterTrackedPane();
+        // [CUSTOM] kill-pane 失败时仅移除已追踪 pane，避免重复关闭导致误减计数。
+        unregisterTrackedPane(false);
 
-        if (this.openPanelPaneCount === 0) {
+        if (this.currentPanelPaneCount() === 0) {
           // [CUSTOM] Restore status bar after the last panel closes.
           await this.restoreStatusBarNow(tmux);
         }
 
         return false;
       } catch (err) {
-        unregisterTrackedPane();
+        // [CUSTOM] 异常路径同样避免盲目计数回退。
+        unregisterTrackedPane(false);
 
-        if (this.openPanelPaneCount === 0) {
+        if (this.currentPanelPaneCount() === 0) {
           // [CUSTOM] Restore status bar after the last panel closes.
           await this.restoreStatusBarNow(tmux);
         }
@@ -359,6 +381,15 @@ export class TmuxMultiplexer implements Multiplexer {
     });
   }
 
+  // [CUSTOM] Authoritative active panel count by layout strategy.
+  private currentPanelPaneCount(): number {
+    if (this.storedLayout === 'right-binary-8') {
+      return this.binaryPaneIds.length;
+    }
+
+    return this.openPanelPaneCount;
+  }
+
   // [CUSTOM] Panel capacity differs by layout strategy.
   private maxPanelPanes(): number {
     const layoutCap = this.layoutPanelCap();
@@ -377,12 +408,15 @@ export class TmuxMultiplexer implements Multiplexer {
   }
 
   // [CUSTOM] Build split plan for either column mode or right-binary mode.
-  private buildSplitPlan():
+  private async buildSplitPlan(
+    tmux: string,
+  ): Promise<
     | { mode: 'column'; column: 0 | 1; splitArgs: string[] }
     | { mode: 'binary'; splitArgs: string[] }
-    | null {
+    | null
+  > {
     if (this.storedLayout === 'right-binary-8') {
-      const splitArgs = this.buildSplitArgsForRightBinary();
+      const splitArgs = await this.buildSplitArgsForRightBinary(tmux);
       if (!splitArgs) {
         return null;
       }
@@ -405,8 +439,11 @@ export class TmuxMultiplexer implements Multiplexer {
   }
 
   // [CUSTOM] Right-binary layout: 1 -> 2 -> 4 -> 8.
-  private buildSplitArgsForRightBinary(): string[] | null {
-    const count = this.openPanelPaneCount;
+  private async buildSplitArgsForRightBinary(
+    tmux: string,
+  ): Promise<string[] | null> {
+    const count = this.currentPanelPaneCount();
+    const geometries = await this.listKnownBinaryPaneGeometries(tmux);
 
     if (count === 0) {
       // First pane: split from main pane, left/right = 1/2.
@@ -415,7 +452,7 @@ export class TmuxMultiplexer implements Multiplexer {
 
     if (count === 1) {
       // Second pane: split right half into top/bottom.
-      const target = this.pickBinaryTarget(0);
+      const target = this.resolveBinaryTargetPaneId(count, geometries);
       return target
         ? ['-v', '-p', `${TMUX_BINARY_SPLIT_PERCENT}`, ...this.targetArgsFor(target)]
         : null;
@@ -423,7 +460,7 @@ export class TmuxMultiplexer implements Multiplexer {
 
     if (count === 2) {
       // Third pane: split top half horizontally.
-      const target = this.pickBinaryTarget(0);
+      const target = this.resolveBinaryTargetPaneId(count, geometries);
       return target
         ? ['-h', '-p', `${TMUX_BINARY_SPLIT_PERCENT}`, ...this.targetArgsFor(target)]
         : null;
@@ -431,25 +468,253 @@ export class TmuxMultiplexer implements Multiplexer {
 
     if (count === 3) {
       // Fourth pane: split bottom half horizontally => 2x2 (田字).
-      const target = this.pickBinaryTarget(1);
+      const target = this.resolveBinaryTargetPaneId(count, geometries);
       return target
         ? ['-h', '-p', `${TMUX_BINARY_SPLIT_PERCENT}`, ...this.targetArgsFor(target)]
         : null;
     }
 
     // [CUSTOM] 首个田字后（第 5~8 个 pane）按“上下 1/2”扩展。
-    // [CUSTOM] 扩展顺序按行优先：TL -> TR -> BL -> BR。
-    const targetIndex = this.resolveBinaryVerticalTargetIndex(count);
-    const target = this.pickBinaryTarget(targetIndex);
+    // [CUSTOM] 优先右列，避免 5-pane 阶段视觉上向左侧先拥挤。
+    // [CUSTOM] 扩展顺序：TR -> TL -> BR -> BL。
+    const target = this.resolveBinaryTargetPaneId(count, geometries);
     return target
       ? ['-v', '-p', `${TMUX_BINARY_SPLIT_PERCENT}`, ...this.targetArgsFor(target)]
       : null;
   }
 
+  // [CUSTOM] Resolve right-binary split target from tmux geometry first.
+  private resolveBinaryTargetPaneId(
+    count: number,
+    geometries: BinaryPaneGeometry[],
+  ): string | null {
+    if (geometries.length > 0) {
+      if (count === 1) {
+        return geometries[0]?.paneId ?? null;
+      }
+
+      if (count === 2) {
+        return this.pickBinaryPaneByVerticalPosition(geometries, 'top');
+      }
+
+      if (count === 3) {
+        return this.pickBinaryPaneByVerticalPosition(geometries, 'bottom');
+      }
+
+      const quadrant = this.resolveBinaryStageQuadrant(count);
+      const quadrantPaneId = this.pickBinaryPaneByQuadrant(
+        geometries,
+        quadrant,
+      );
+      if (quadrantPaneId) {
+        return quadrantPaneId;
+      }
+    }
+
+    // [CUSTOM] Fallback to tracked insertion order if geometry is unavailable.
+    if (count <= 2) {
+      return this.pickBinaryTarget(0);
+    }
+
+    if (count === 3) {
+      return this.pickBinaryTarget(1);
+    }
+
+    const targetIndex = this.resolveBinaryVerticalTargetIndex(count);
+    return this.pickBinaryTarget(targetIndex);
+  }
+
+  // [CUSTOM] Pick a top-most or bottom-most pane by current geometry.
+  private pickBinaryPaneByVerticalPosition(
+    geometries: BinaryPaneGeometry[],
+    direction: 'top' | 'bottom',
+  ): string | null {
+    const sorted = [...geometries].sort((a, b) => {
+      if (a.top !== b.top) {
+        return direction === 'top' ? a.top - b.top : b.top - a.top;
+      }
+
+      if (a.left !== b.left) {
+        return a.left - b.left;
+      }
+
+      return b.height - a.height;
+    });
+
+    return sorted[0]?.paneId ?? null;
+  }
+
+  // [CUSTOM] Stage order for 5~8 pane expansions.
+  private resolveBinaryStageQuadrant(
+    count: number,
+  ): 'TL' | 'TR' | 'BL' | 'BR' {
+    const stageOrder: Array<'TR' | 'TL' | 'BR' | 'BL'> = [
+      'TR',
+      'TL',
+      'BR',
+      'BL',
+    ];
+    return stageOrder[count - 4] ?? 'TR';
+  }
+
+  // [CUSTOM] Pick pane from target quadrant using live tmux coordinates.
+  private pickBinaryPaneByQuadrant(
+    geometries: BinaryPaneGeometry[],
+    quadrant: 'TL' | 'TR' | 'BL' | 'BR',
+  ): string | null {
+    const minLeft = Math.min(...geometries.map((pane) => pane.left));
+    const maxRight = Math.max(
+      ...geometries.map((pane) => pane.left + pane.width),
+    );
+    const minTop = Math.min(...geometries.map((pane) => pane.top));
+    const maxBottom = Math.max(
+      ...geometries.map((pane) => pane.top + pane.height),
+    );
+
+    const centerX = (minLeft + maxRight) / 2;
+    const centerY = (minTop + maxBottom) / 2;
+
+    const candidates = geometries.filter((pane) => {
+      const paneCenterX = pane.left + pane.width / 2;
+      const paneCenterY = pane.top + pane.height / 2;
+      const isLeft = paneCenterX < centerX;
+      const isTop = paneCenterY < centerY;
+
+      if (quadrant === 'TL') {
+        return isLeft && isTop;
+      }
+      if (quadrant === 'TR') {
+        return !isLeft && isTop;
+      }
+      if (quadrant === 'BL') {
+        return isLeft && !isTop;
+      }
+
+      return !isLeft && !isTop;
+    });
+
+    if (candidates.length === 0) {
+      return null;
+    }
+
+    // [CUSTOM] Prefer unsplit (larger height) pane in the target quadrant.
+    candidates.sort((a, b) => {
+      if (a.height !== b.height) {
+        return b.height - a.height;
+      }
+
+      const areaA = a.width * a.height;
+      const areaB = b.width * b.height;
+      if (areaA !== areaB) {
+        return areaB - areaA;
+      }
+
+      if (a.top !== b.top) {
+        return a.top - b.top;
+      }
+
+      return a.left - b.left;
+    });
+
+    return candidates[0]?.paneId ?? null;
+  }
+
+  // [CUSTOM] Read live tmux pane geometry to avoid stale right-binary order.
+  private async listKnownBinaryPaneGeometries(
+    tmux: string,
+  ): Promise<BinaryPaneGeometry[]> {
+    if (this.binaryPaneIds.length === 0) {
+      return [];
+    }
+
+    try {
+      const proc = crossSpawn(
+        [
+          tmux,
+          'list-panes',
+          ...this.targetArgs(),
+          '-F',
+          '#{pane_id}\t#{pane_left}\t#{pane_top}\t#{pane_width}\t#{pane_height}',
+        ],
+        {
+          stdout: 'pipe',
+          stderr: 'pipe',
+        },
+      );
+
+      const exitCode = await proc.exited;
+      if (exitCode !== 0) {
+        return [];
+      }
+
+      const stdout = await proc.stdout();
+      const parsed = stdout
+        .split('\n')
+        .map((line) => this.parseBinaryPaneGeometryLine(line.trim()))
+        .filter((pane): pane is BinaryPaneGeometry => pane !== null);
+
+      if (parsed.length === 0) {
+        return [];
+      }
+
+      const geometryByPaneId = new Map(parsed.map((pane) => [pane.paneId, pane]));
+      const nextPaneIds = this.binaryPaneIds.filter((paneId) =>
+        geometryByPaneId.has(paneId),
+      );
+
+      if (nextPaneIds.length !== this.binaryPaneIds.length) {
+        this.binaryPaneIds = nextPaneIds;
+        this.openPanelPaneCount = nextPaneIds.length;
+      }
+
+      return nextPaneIds
+        .map((paneId) => geometryByPaneId.get(paneId))
+        .filter((pane): pane is BinaryPaneGeometry => pane !== undefined);
+    } catch {
+      return [];
+    }
+  }
+
+  // [CUSTOM] Parse one list-panes geometry row.
+  private parseBinaryPaneGeometryLine(line: string): BinaryPaneGeometry | null {
+    if (!line) {
+      return null;
+    }
+
+    const [paneId, left, top, width, height] = line.split('\t');
+    if (!paneId || !left || !top || !width || !height) {
+      return null;
+    }
+
+    const parsedLeft = Number.parseInt(left, 10);
+    const parsedTop = Number.parseInt(top, 10);
+    const parsedWidth = Number.parseInt(width, 10);
+    const parsedHeight = Number.parseInt(height, 10);
+
+    if (
+      Number.isNaN(parsedLeft) ||
+      Number.isNaN(parsedTop) ||
+      Number.isNaN(parsedWidth) ||
+      Number.isNaN(parsedHeight)
+    ) {
+      return null;
+    }
+
+    return {
+      paneId,
+      left: parsedLeft,
+      top: parsedTop,
+      width: parsedWidth,
+      height: parsedHeight,
+    };
+  }
+
   // [CUSTOM] 解析右侧“上下 1/2”扩展的目标索引顺序。
   private resolveBinaryVerticalTargetIndex(count: number): number {
     if (count >= 4 && count < 8) {
-      const firstExpansionOrder = [0, 2, 1, 3];
+      // [CUSTOM] binaryPaneIds 顺序为 [TL, BL, TR, BR]。
+      // [CUSTOM] 5~8 pane 选择顺序为 TR, TL, BR, BL => [2, 0, 3, 1]。
+      const firstExpansionOrder = [2, 0, 3, 1];
       return firstExpansionOrder[count - 4] ?? count - 4;
     }
 
@@ -497,7 +762,7 @@ export class TmuxMultiplexer implements Multiplexer {
   ): void {
     if (plan.mode === 'binary') {
       this.binaryPaneIds.push(paneId);
-      this.openPanelPaneCount += 1;
+      this.openPanelPaneCount = this.binaryPaneIds.length;
       return;
     }
 
@@ -558,11 +823,9 @@ export class TmuxMultiplexer implements Multiplexer {
 
     this.binaryPaneIds.splice(index, 1);
 
-    if (this.openPanelPaneCount > 0) {
-      this.openPanelPaneCount -= 1;
-    }
+    this.openPanelPaneCount = this.binaryPaneIds.length;
 
-    if (this.openPanelPaneCount === 0) {
+    if (this.binaryPaneIds.length === 0) {
       this.binaryPaneIds = [];
       this.paneColumnById.clear();
       this.paneIdsByColumn = [[], []];

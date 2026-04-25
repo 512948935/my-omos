@@ -201,6 +201,7 @@ describe('MultiplexerSessionManager', () => {
       const secondCreate = manager.onSessionCreated(event);
 
       await Promise.resolve();
+      await Promise.resolve();
 
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
 
@@ -487,6 +488,172 @@ describe('MultiplexerSessionManager', () => {
       });
 
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-2r');
+    });
+
+    test('deduplicates concurrent close requests for same session', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(ctx, {
+        ...defaultMultiplexerConfig,
+        layout: 'right-binary-8',
+      });
+      const closeGate = createDeferred<boolean>();
+
+      mockMultiplexer.spawnPane.mockResolvedValueOnce({
+        success: true,
+        paneId: 'p-dup',
+      });
+
+      mockMultiplexer.closePane.mockImplementation(async () => {
+        await closeGate.promise;
+        return true;
+      });
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'dup-close',
+            parentID: 'parent-dup-close',
+            title: 'Dup Worker',
+          },
+        },
+      });
+
+      const closeFromIdle = manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'dup-close',
+          status: { type: 'idle' },
+        },
+      });
+
+      const closeFromDeleted = manager.onSessionDeleted({
+        type: 'session.deleted',
+        properties: {
+          sessionID: 'dup-close',
+        },
+      });
+
+      await Promise.resolve();
+
+      // [CUSTOM] 两条关闭路径并发时，只允许一次 closePane 进入执行。
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+
+      closeGate.resolve(true);
+      await Promise.all([closeFromIdle, closeFromDeleted]);
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-dup');
+    });
+
+    test('waits for right-binary rebalance before spawning new session', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(ctx, {
+        ...defaultMultiplexerConfig,
+        layout: 'right-binary-8',
+      });
+      const rebalanceCloseGate = createDeferred<boolean>();
+      const rebalanceCloseStarted = createDeferred<void>();
+
+      mockMultiplexer.spawnPane
+        .mockResolvedValueOnce({ success: true, paneId: 'p-1' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-2' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-3' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-2r' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-3r' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-4' });
+
+      mockMultiplexer.closePane.mockImplementation(async (paneId: string) => {
+        if (paneId === 'p-2') {
+          rebalanceCloseStarted.resolve();
+          await rebalanceCloseGate.promise;
+        }
+        return true;
+      });
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-1',
+            parentID: 'parent-rb',
+            title: 'Worker One',
+          },
+        },
+      });
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-2',
+            parentID: 'parent-rb',
+            title: 'Worker Two',
+          },
+        },
+      });
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-3',
+            parentID: 'parent-rb',
+            title: 'Worker Three',
+          },
+        },
+      });
+
+      const closeIdlePromise = manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'rb-1',
+          status: { type: 'idle' },
+        },
+      });
+
+      // [CUSTOM] Pause midway through rebalance, after closing the first survivor.
+      await rebalanceCloseStarted.promise;
+
+      const createDuringRebalancePromise = manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-4',
+            parentID: 'parent-rb',
+            title: 'Worker Four',
+          },
+        },
+      });
+
+      // [CUSTOM] New session should wait, not spawn while rebalance is in flight.
+      await Promise.resolve();
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(3);
+
+      rebalanceCloseGate.resolve(true);
+
+      await Promise.all([closeIdlePromise, createDuringRebalancePromise]);
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(6);
+      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
+        4,
+        'rb-2',
+        'Worker Two',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
+        5,
+        'rb-3',
+        'Worker Three',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
+        6,
+        'rb-4',
+        'Worker Four',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
     });
 
     test('does nothing on busy for unknown session', async () => {

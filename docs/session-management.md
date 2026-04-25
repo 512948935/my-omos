@@ -39,9 +39,18 @@ The orchestrator sees a compact reminder in its system context, for example:
 
 ```text
 ### Resumable Sessions
-explorer: exp-1 Search routing files
-oracle: ora-1 Review auth architecture
+- explorer: exp-1 Search routing files
+  Context read by exp-1: src/router.ts (120 lines), src/routes/api.ts (74 lines)
+- oracle: ora-1 Review auth architecture
 ```
+
+When a child session reads files through OpenCode's `read` tool, the reminder can
+include a compact list of files that session has already inspected. This helps the
+orchestrator choose the right session to resume for related follow-up work.
+
+To keep the prompt small, read context only shows files where at least 10 lines
+were read, includes line counts, and caps each remembered session to the most
+recent 8 files by default. Both thresholds are configurable.
 
 On a related follow-up, the orchestrator can reuse that session instead of
 launching a fresh one. If the remembered child session no longer exists, the
@@ -59,6 +68,8 @@ Session management is intentionally narrow:
 - It does not change manual `@agent` calls.
 - It keeps only a small number of recent sessions per specialist type.
 - Missing or deleted child sessions are cleaned up automatically.
+- Read context is best-effort and tracks normal OpenCode `read` tool usage, not
+  arbitrary filesystem access through shell commands or external MCP tools.
 
 This keeps the feature useful for continuity without turning child sessions into
 long-lived global state.
@@ -91,12 +102,14 @@ default.
 
 ## Configuration
 
-Only add `sessionManager` if you want to change the default limit:
+Only add `sessionManager` if you want to change the default limits:
 
 ```jsonc
 {
   "sessionManager": {
-    "maxSessionsPerAgent": 2
+    "maxSessionsPerAgent": 2,
+    "readContextMinLines": 10,
+    "readContextMaxFiles": 8
   }
 }
 ```
@@ -106,6 +119,23 @@ Only add `sessionManager` if you want to change the default limit:
 | Type | Default | Range | Meaning |
 |------|---------|-------|---------|
 | integer | `2` | `1`–`10` | Number of recent resumable child sessions remembered per specialist type in the current parent session |
+
+### `sessionManager.readContextMinLines`
+
+| Type | Default | Range | Meaning |
+|------|---------|-------|---------|
+| integer | `10` | `0`–`1000` | Minimum number of lines read from a file before it appears in resumable-session context |
+
+Set this lower if you want short config files to appear. Set it higher to keep
+the prompt focused on substantial file reads.
+
+### `sessionManager.readContextMaxFiles`
+
+| Type | Default | Range | Meaning |
+|------|---------|-------|---------|
+| integer | `8` | `0`–`50` | Maximum number of recent read-context files shown per remembered child session |
+
+Set this to `0` to keep session aliases but hide read-context file lists.
 
 Use a higher value if you often run several parallel threads per specialist. Use
 a lower value if you want fewer aliases in the orchestrator context.
@@ -129,7 +159,8 @@ Example with a smaller memory window:
 ```jsonc
 {
   "sessionManager": {
-    "maxSessionsPerAgent": 1
+    "maxSessionsPerAgent": 1,
+    "readContextMaxFiles": 4
   }
 }
 ```
@@ -139,7 +170,8 @@ Example with a larger memory window:
 ```jsonc
 {
   "sessionManager": {
-    "maxSessionsPerAgent": 4
+    "maxSessionsPerAgent": 4,
+    "readContextMinLines": 5
   }
 }
 ```
