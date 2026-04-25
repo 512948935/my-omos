@@ -56,7 +56,8 @@ Edit `~/.config/opencode/oh-my-opencode-slim.json` (or `.jsonc`):
   "multiplexer": {
     "type": "auto",
     "layout": "main-vertical",
-    "main_pane_size": 60
+    "main_pane_size": 60,
+    "panel_rows_per_column": 3
   }
 }
 ```
@@ -68,7 +69,8 @@ Edit `~/.config/opencode/oh-my-opencode-slim.json` (or `.jsonc`):
   "multiplexer": {
     "type": "tmux",
     "layout": "main-vertical",
-    "main_pane_size": 60
+    "main_pane_size": 60,
+    "panel_rows_per_column": 3
   }
 }
 ```
@@ -120,7 +122,8 @@ Please analyze this codebase and create a documentation structure.
   "multiplexer": {
     "type": "auto",
     "layout": "main-vertical",
-    "main_pane_size": 60
+    "main_pane_size": 60,
+    "panel_rows_per_column": 3
   }
 }
 ```
@@ -128,8 +131,10 @@ Please analyze this codebase and create a documentation structure.
 | Setting | Type | Default | Description |
 |---------|------|---------|-------------|
 | `type` | string | `"none"` | `"auto"`, `"tmux"`, `"zellij"`, or `"none"` |
-| `layout` | string | `"main-vertical"` | Layout preset for tmux only |
+| `layout` | string | `"main-vertical"` | Layout preset for tmux only (`main-vertical`, `main-horizontal`, `right-binary-8`, `tiled`, `even-horizontal`, `even-vertical`); `right-binary-8` 固定左右各 `1/2`，右侧先到“田字”后按“上下 1/2”递归扩展，pane 数减少时会自动重排恢复均分，不使用 `main_pane_size` |
 | `main_pane_size` | number | `60` | Main pane size percentage for tmux only (`20`-`80`) |
+| `max_panel_panes` | integer | `8` | Global panel count cap (`1-8`); overflow sessions enter pending queue and are promoted FIFO when capacity frees |
+| `panel_rows_per_column` | integer | `3` | Tmux panel rows per column (`2-5`), fixed max 2 columns; layout capacity = `2 × rows` (range `[4-10]`), final visible cap still limited by `max_panel_panes`; when column 2 is active, main + each panel column are approximately `1/3` width（`right-binary-8` 布局不使用该项） |
 
 ### Supported Multiplexers
 
@@ -147,7 +152,8 @@ Older configs still work:
   "tmux": {
     "enabled": true,
     "layout": "main-vertical",
-    "main_pane_size": 60
+    "main_pane_size": 60,
+    "panel_rows_per_column": 3
   }
 }
 ```

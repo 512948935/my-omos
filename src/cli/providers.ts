@@ -106,6 +106,10 @@ export function generateLiteConfig(
       enabled: true,
       layout: "main-vertical",
       main_pane_size: 60,
+      // [CUSTOM] Global panel cap default: 8 panes.
+      max_panel_panes: 8,
+      // [CUSTOM] Default per-column row cap: 3 (total 2x3 = 6 panes).
+      panel_rows_per_column: 3,
     };
   }
 

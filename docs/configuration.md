@@ -103,11 +103,15 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `showStartupToast` | boolean | `true` | Show the startup activation toast (`oh-my-opencode-slim is active`) when OpenCode starts |
 | `autoUpdate` | boolean | `true` | Automatically install plugin updates in the background; set to `false` for notification-only mode |
 | `multiplexer.type` | string | `"none"` | Multiplexer mode: `auto`, `tmux`, `zellij`, or `none` |
-| `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `tiled`, `even-horizontal`, `even-vertical` |
+| `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `right-binary-8`, `tiled`, `even-horizontal`, `even-vertical`（`right-binary-8` 固定左右各 `1/2`，右侧先到“田字”后按“上下 1/2”递归扩展；当 pane 数减少时会自动重排以恢复均分；不使用 `main_pane_size`） |
 | `multiplexer.main_pane_size` | number | `60` | Main pane size as percentage (20–80) |
+| `multiplexer.max_panel_panes` | integer | `8` | Global panel count cap (`1-8`)；超过时进入等待队列，空位出现后按 FIFO 尝试显示 |
+| `multiplexer.panel_rows_per_column` | integer | `3` | Tmux panel rows per column (`2-5`), fixed max 2 columns; layout capacity = `2 × rows` (range `[4-10]`), final visible cap still受 `max_panel_panes` 约束；when column 2 is active, main + each panel column are approximately `1/3` width（`right-binary-8` 布局不使用该项） |
 | `tmux.enabled` | boolean | `false` | Legacy alias for `multiplexer.type = "tmux"` |
 | `tmux.layout` | string | `"main-vertical"` | Legacy alias for `multiplexer.layout` |
 | `tmux.main_pane_size` | number | `60` | Legacy alias for `multiplexer.main_pane_size` |
+| `tmux.max_panel_panes` | integer | `8` | Legacy alias for `multiplexer.max_panel_panes`（`1-8`） |
+| `tmux.panel_rows_per_column` | integer | `3` | Legacy alias for `multiplexer.panel_rows_per_column` |
 | `sessionManager.maxSessionsPerAgent` | integer | `2` | Maximum remembered resumable child sessions per specialist type in the current orchestrator session (1–10). See [Session Management](session-management.md) |
 | `disabled_mcps` | string[] | `[]` | MCP server IDs to disable globally |
 | `fallback.enabled` | boolean | `false` | Enable model failover on timeout/error |

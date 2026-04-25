@@ -407,6 +407,7 @@
           "enum": [
             "main-horizontal",
             "main-vertical",
+            "right-binary-8",
             "tiled",
             "even-horizontal",
             "even-vertical"
@@ -417,6 +418,16 @@
           "type": "number",
           "minimum": 20,
           "maximum": 80
+        },
+        "max_panel_panes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "panel_rows_per_column": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 5
         }
       }
     },
@@ -433,6 +444,7 @@
           "enum": [
             "main-horizontal",
             "main-vertical",
+            "right-binary-8",
             "tiled",
             "even-horizontal",
             "even-vertical"
@@ -443,6 +455,16 @@
           "type": "number",
           "minimum": 20,
           "maximum": 80
+        },
+        "max_panel_panes": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 8
+        },
+        "panel_rows_per_column": {
+          "type": "integer",
+          "minimum": 2,
+          "maximum": 5
         }
       }
     },

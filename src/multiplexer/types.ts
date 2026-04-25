@@ -10,6 +10,8 @@ import type { MultiplexerConfig, MultiplexerLayout } from '../config/schema';
 export interface PaneResult {
   success: boolean;
   paneId?: string;
+  // [CUSTOM] Optional spawn failure reason for queueing decisions.
+  reason?: 'capacity' | 'error';
 }
 
 /**

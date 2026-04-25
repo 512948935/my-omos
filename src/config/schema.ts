@@ -117,6 +117,7 @@ export type MultiplexerType = z.infer<typeof MultiplexerTypeSchema>;
 export const MultiplexerLayoutSchema = z.enum([
   'main-horizontal', // Main pane on top, agents stacked below
   'main-vertical', // Main pane on left, agents stacked on right
+  'right-binary-8', // [CUSTOM] Main left 1/2; right panel grows 1→2→4→8
   'tiled', // All panes equal size grid
   'even-horizontal', // All panes side by side
   'even-vertical', // All panes stacked vertically
@@ -133,6 +134,12 @@ export const MultiplexerConfigSchema = z.object({
   type: MultiplexerTypeSchema.default('none'),
   layout: MultiplexerLayoutSchema.default('main-vertical'),
   main_pane_size: z.number().min(20).max(80).default(60), // percentage for main pane
+  // [CUSTOM] Global panel count cap for tmux layouts (max 8).
+  max_panel_panes: z.number().int().min(1).max(8).optional(),
+  // [CUSTOM] Max rows per subagent column in right-side panel (2-5).
+  // Keep optional here so deep-merge across user/project configs preserves
+  // explicitly set values from higher-precedence layers.
+  panel_rows_per_column: z.number().int().min(2).max(5).optional(),
 });
 
 export type MultiplexerConfig = z.infer<typeof MultiplexerConfigSchema>;
@@ -143,6 +150,12 @@ export const TmuxConfigSchema = z.object({
   enabled: z.boolean().default(false),
   layout: TmuxLayoutSchema.default('main-vertical'),
   main_pane_size: z.number().min(20).max(80).default(60), // percentage for main pane
+  // [CUSTOM] Legacy alias for multiplexer.max_panel_panes.
+  max_panel_panes: z.number().int().min(1).max(8).optional(),
+  // [CUSTOM] Legacy alias for multiplexer.panel_rows_per_column.
+  // Keep optional here so deep-merge across user/project configs preserves
+  // explicitly set values from higher-precedence layers.
+  panel_rows_per_column: z.number().int().min(2).max(5).optional(),
 });
 
 export type TmuxConfig = z.infer<typeof TmuxConfigSchema>;

@@ -169,6 +169,10 @@ const OhMyOpenCodeLite: Plugin = async (ctx) => {
       type: config.multiplexer?.type ?? 'none',
       layout: config.multiplexer?.layout ?? 'main-vertical',
       main_pane_size: config.multiplexer?.main_pane_size ?? 60,
+      // [CUSTOM] Global panel cap defaults to 8.
+      max_panel_panes: config.multiplexer?.max_panel_panes ?? 8,
+      // [CUSTOM] Default 3 rows per panel column (2 columns => 6 panes).
+      panel_rows_per_column: config.multiplexer?.panel_rows_per_column ?? 3,
     };
 
     // Get multiplexer instance for capability checks

@@ -325,6 +325,8 @@ describe("deepMerge behavior", () => {
           enabled: true,
           layout: "main-vertical",
           main_pane_size: 60,
+          max_panel_panes: 7,
+          panel_rows_per_column: 4,
         },
       })
     );
@@ -347,6 +349,8 @@ describe("deepMerge behavior", () => {
     expect(config.tmux?.enabled).toBe(false); // From project (override)
     expect(config.tmux?.layout).toBe("tiled"); // From project
     expect(config.tmux?.main_pane_size).toBe(60); // From user (preserved)
+    expect(config.tmux?.max_panel_panes).toBe(7); // Preserved from user
+    expect(config.tmux?.panel_rows_per_column).toBe(4); // Preserved from user
   });
 
   test("preserves user tmux.enabled when project doesn't specify", () => {

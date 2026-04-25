@@ -62,6 +62,8 @@ describe("providers", () => {
     expect(config.tmux).toBeDefined();
     expect((config.tmux as any).enabled).toBe(true);
     expect((config.tmux as any).layout).toBe("main-vertical");
+    expect((config.tmux as any).max_panel_panes).toBe(8);
+    expect((config.tmux as any).panel_rows_per_column).toBe(3);
   });
 
   test("generateLiteConfig includes default skills", () => {

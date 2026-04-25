@@ -28,7 +28,13 @@ export function getMultiplexer(config: MultiplexerConfig): Multiplexer | null {
 
   switch (type) {
     case 'tmux':
-      multiplexer = new TmuxMultiplexer(config.layout, config.main_pane_size);
+      // [CUSTOM] Pass tmux panel rows-per-column config to backend.
+      multiplexer = new TmuxMultiplexer(
+        config.layout,
+        config.main_pane_size,
+        config.panel_rows_per_column ?? 3,
+        config.max_panel_panes ?? 8,
+      );
       actualType = 'tmux';
       break;
     case 'zellij':
@@ -39,7 +45,13 @@ export function getMultiplexer(config: MultiplexerConfig): Multiplexer | null {
       // Auto-detect based on environment variables only
       // Note: Does NOT fall back to binary availability checks
       if (process.env.TMUX) {
-        multiplexer = new TmuxMultiplexer(config.layout, config.main_pane_size);
+        // [CUSTOM] Pass tmux panel rows-per-column config to backend.
+        multiplexer = new TmuxMultiplexer(
+          config.layout,
+          config.main_pane_size,
+          config.panel_rows_per_column ?? 3,
+          config.max_panel_panes ?? 8,
+        );
         actualType = 'tmux';
       } else if (process.env.ZELLIJ) {
         multiplexer = new ZellijMultiplexer(

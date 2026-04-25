@@ -27,6 +27,8 @@ interface KnownSession {
   directory: string;
 }
 
+type SpawnAttemptResult = 'spawned' | 'capacity' | 'failed' | 'skipped';
+
 interface SessionEvent {
   type: string;
   properties?: {
@@ -43,6 +45,7 @@ interface SessionEvent {
 
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const SESSION_MISSING_GRACE_MS = POLL_INTERVAL_BACKGROUND_MS * 3;
+const RIGHT_BINARY_LAYOUT = 'right-binary-8' as const;
 
 /**
  * Tracks child sessions and spawns/closes multiplexer panes for them.
@@ -55,9 +58,16 @@ export class MultiplexerSessionManager {
   private serverUrl: string;
   private directory: string;
   private multiplexer: Multiplexer | null = null;
+  private multiplexerLayout: MultiplexerConfig['layout'];
   private sessions = new Map<string, TrackedSession>();
   private knownSessions = new Map<string, KnownSession>();
   private spawningSessions = new Set<string>();
+  // [CUSTOM] Queue sessions waiting for pane capacity.
+  private pendingQueue: string[] = [];
+  private pendingSessionIds = new Set<string>();
+  private drainingPendingQueue = false;
+  // [CUSTOM] Guard against nested right-binary rebalance cycles.
+  private rebalancingRightBinaryLayout = false;
   private pollInterval?: ReturnType<typeof setInterval>;
   private enabled = false;
 
@@ -69,6 +79,7 @@ export class MultiplexerSessionManager {
       ctx.serverUrl?.toString() ?? `http://localhost:${defaultPort}`;
 
     this.multiplexer = getMultiplexer(config);
+    this.multiplexerLayout = config.layout;
     this.enabled =
       config.type !== 'none' &&
       this.multiplexer !== null &&
@@ -94,12 +105,13 @@ export class MultiplexerSessionManager {
     const parentId = info.parentID;
     const title = info.title ?? 'Subagent';
     const directory = info.directory ?? this.directory;
-
-    this.knownSessions.set(sessionId, {
+    const knownSession: KnownSession = {
       parentId,
       title,
       directory,
-    });
+    };
+
+    this.knownSessions.set(sessionId, knownSession);
 
     if (this.isTrackedOrSpawning(sessionId)) {
       log('[multiplexer-session-manager] session already tracked or spawning', {
@@ -108,60 +120,14 @@ export class MultiplexerSessionManager {
       return;
     }
 
-    this.spawningSessions.add(sessionId);
+    const result = await this.spawnKnownSession(
+      sessionId,
+      knownSession,
+      'created',
+    );
 
-    try {
-      const serverRunning = await isServerRunning(this.serverUrl);
-      if (!serverRunning) {
-        log('[multiplexer-session-manager] server not running, skipping', {
-          serverUrl: this.serverUrl,
-        });
-        return;
-      }
-
-      if (this.sessions.has(sessionId)) {
-        return;
-      }
-
-      log(
-        '[multiplexer-session-manager] child session created, spawning pane',
-        {
-          sessionId,
-          parentId,
-          title,
-        },
-      );
-
-      const paneResult = await this.multiplexer
-        .spawnPane(sessionId, title, this.serverUrl, directory)
-        .catch((err) => {
-          log('[multiplexer-session-manager] failed to spawn pane', {
-            error: String(err),
-          });
-          return { success: false, paneId: undefined };
-        });
-
-      if (paneResult.success && paneResult.paneId) {
-        const now = Date.now();
-        this.sessions.set(sessionId, {
-          sessionId,
-          paneId: paneResult.paneId,
-          parentId,
-          title,
-          directory,
-          createdAt: now,
-          lastSeenAt: now,
-        });
-
-        log('[multiplexer-session-manager] pane spawned', {
-          sessionId,
-          paneId: paneResult.paneId,
-        });
-
-        this.startPolling();
-      }
-    } finally {
-      this.spawningSessions.delete(sessionId);
+    if (result === 'capacity') {
+      this.enqueuePendingSession(sessionId);
     }
   }
 
@@ -173,11 +139,19 @@ export class MultiplexerSessionManager {
     if (!sessionId) return;
 
     if (event.properties?.status?.type === 'idle') {
+      // [CUSTOM] If a queued session finishes before display, drop it.
+      this.dequeuePendingSession(sessionId);
       await this.closeSession(sessionId);
+      await this.drainPendingQueue();
       return;
     }
 
     if (event.properties?.status?.type === 'busy') {
+      if (this.pendingSessionIds.has(sessionId)) {
+        await this.drainPendingQueue();
+        return;
+      }
+
       await this.respawnIfKnown(sessionId);
     }
   }
@@ -193,8 +167,10 @@ export class MultiplexerSessionManager {
       sessionId,
     });
 
+    this.dequeuePendingSession(sessionId);
     await this.closeSession(sessionId);
     this.knownSessions.delete(sessionId);
+    await this.drainPendingQueue();
   }
 
   private startPolling(): void {
@@ -272,8 +248,88 @@ export class MultiplexerSessionManager {
     await this.multiplexer.closePane(tracked.paneId);
     this.sessions.delete(sessionId);
 
+    // [CUSTOM] right-binary 布局在 pane 数变化后需要重算并重排。
+    await this.rebalanceRightBinaryLayoutIfNeeded();
+
     if (this.sessions.size === 0) {
       this.stopPolling();
+    }
+
+    await this.drainPendingQueue();
+  }
+
+  // [CUSTOM] Whether we should rebuild pane placement for right-binary mode.
+  private shouldRebalanceRightBinaryLayout(): boolean {
+    return this.multiplexerLayout === RIGHT_BINARY_LAYOUT;
+  }
+
+  // [CUSTOM] Rebuild remaining right-binary panes to keep equal splits.
+  private async rebalanceRightBinaryLayoutIfNeeded(): Promise<void> {
+    if (!this.multiplexer) return;
+    if (!this.shouldRebalanceRightBinaryLayout()) return;
+    if (this.rebalancingRightBinaryLayout) return;
+    if (this.sessions.size <= 1) return;
+
+    this.rebalancingRightBinaryLayout = true;
+
+    try {
+      const survivors = Array.from(this.sessions.values())
+        .sort((a, b) => a.createdAt - b.createdAt)
+        .map((tracked) => ({ ...tracked }));
+
+      log('[multiplexer-session-manager] rebalancing right-binary panes', {
+        count: survivors.length,
+      });
+
+      // [CUSTOM] 先清空旧 pane，再按当前会话顺序重新挂载，确保均分。
+      for (const tracked of survivors) {
+        await this.multiplexer.closePane(tracked.paneId);
+      }
+
+      for (const tracked of survivors) {
+        const current = this.sessions.get(tracked.sessionId);
+        if (!current) {
+          continue;
+        }
+
+        const known = this.knownSessions.get(tracked.sessionId) ?? {
+          parentId: tracked.parentId,
+          title: tracked.title,
+          directory: tracked.directory,
+        };
+
+        const paneResult = await this.multiplexer
+          .spawnPane(
+            tracked.sessionId,
+            known.title,
+            this.serverUrl,
+            known.directory,
+          )
+          .catch((err) => {
+            log('[multiplexer-session-manager] rebalance spawn failed', {
+              sessionId: tracked.sessionId,
+              error: String(err),
+            });
+            return { success: false as const, reason: 'error' as const };
+          });
+
+        if (paneResult.success && paneResult.paneId) {
+          current.paneId = paneResult.paneId;
+          current.lastSeenAt = Date.now();
+          current.missingSince = undefined;
+          continue;
+        }
+
+        log('[multiplexer-session-manager] rebalance deferred to queue', {
+          sessionId: tracked.sessionId,
+          reason: paneResult.reason ?? 'unknown',
+        });
+
+        this.sessions.delete(tracked.sessionId);
+        this.enqueuePendingSession(tracked.sessionId);
+      }
+    } finally {
+      this.rebalancingRightBinaryLayout = false;
     }
   }
 
@@ -284,62 +340,191 @@ export class MultiplexerSessionManager {
     const known = this.knownSessions.get(sessionId);
     if (!known) return;
 
+    const result = await this.spawnKnownSession(sessionId, known, 'busy');
+    if (result === 'capacity') {
+      this.enqueuePendingSession(sessionId);
+    }
+  }
+
+  // [CUSTOM] Unified spawn path for created/busy/queued sessions.
+  private async spawnKnownSession(
+    sessionId: string,
+    known: KnownSession,
+    trigger: 'created' | 'busy' | 'queue',
+  ): Promise<SpawnAttemptResult> {
+    if (!this.multiplexer) return 'skipped';
+    if (this.isTrackedOrSpawning(sessionId)) return 'skipped';
+
     this.spawningSessions.add(sessionId);
 
     try {
       const serverRunning = await isServerRunning(this.serverUrl);
       if (!serverRunning) {
         log(
-          '[multiplexer-session-manager] server not running, skipping busy respawn',
+          '[multiplexer-session-manager] server not running, skipping spawn',
           {
             serverUrl: this.serverUrl,
             sessionId,
+            trigger,
           },
         );
-        return;
+        return 'skipped';
       }
 
-      if (this.sessions.has(sessionId)) return;
+      if (this.sessions.has(sessionId)) return 'skipped';
 
-      log(
-        '[multiplexer-session-manager] child session busy again, respawning pane',
-        {
-          sessionId,
-          parentId: known.parentId,
-          title: known.title,
-        },
-      );
+      const logMessageByTrigger = {
+        created: '[multiplexer-session-manager] child session created, spawning pane',
+        busy: '[multiplexer-session-manager] child session busy again, respawning pane',
+        queue:
+          '[multiplexer-session-manager] dequeued child session, spawning pane',
+      } as const;
+
+      log(logMessageByTrigger[trigger], {
+        sessionId,
+        parentId: known.parentId,
+        title: known.title,
+      });
 
       const paneResult = await this.multiplexer
         .spawnPane(sessionId, known.title, this.serverUrl, known.directory)
         .catch((err) => {
-          log('[multiplexer-session-manager] failed to respawn pane', {
+          log('[multiplexer-session-manager] failed to spawn pane', {
             error: String(err),
+            trigger,
           });
-          return { success: false, paneId: undefined };
+          return {
+            success: false,
+            paneId: undefined,
+            reason: 'error',
+          };
         });
 
-      if (!paneResult.success || !paneResult.paneId) return;
+      if (paneResult.success && paneResult.paneId) {
+        const now = Date.now();
+        this.sessions.set(sessionId, {
+          sessionId,
+          paneId: paneResult.paneId,
+          parentId: known.parentId,
+          title: known.title,
+          directory: known.directory,
+          createdAt: now,
+          lastSeenAt: now,
+        });
 
-      const now = Date.now();
-      this.sessions.set(sessionId, {
+        log('[multiplexer-session-manager] pane spawned', {
+          sessionId,
+          paneId: paneResult.paneId,
+          trigger,
+        });
+
+        this.startPolling();
+        return 'spawned';
+      }
+
+      if (paneResult.reason === 'capacity') {
+        log('[multiplexer-session-manager] pane capacity reached, queueing', {
+          sessionId,
+          trigger,
+        });
+        return 'capacity';
+      }
+
+      log('[multiplexer-session-manager] pane spawn failed', {
         sessionId,
-        paneId: paneResult.paneId,
-        parentId: known.parentId,
-        title: known.title,
-        directory: known.directory,
-        createdAt: now,
-        lastSeenAt: now,
+        trigger,
+        reason: paneResult.reason ?? 'unknown',
       });
-
-      log('[multiplexer-session-manager] pane respawned on busy', {
-        sessionId,
-        paneId: paneResult.paneId,
-      });
-
-      this.startPolling();
+      return 'failed';
     } finally {
       this.spawningSessions.delete(sessionId);
+    }
+  }
+
+  // [CUSTOM] Enqueue a session waiting for free pane capacity.
+  private enqueuePendingSession(sessionId: string): void {
+    if (this.pendingSessionIds.has(sessionId)) {
+      return;
+    }
+
+    if (!this.knownSessions.has(sessionId)) {
+      return;
+    }
+
+    this.pendingSessionIds.add(sessionId);
+    this.pendingQueue.push(sessionId);
+
+    log('[multiplexer-session-manager] session enqueued for pane', {
+      sessionId,
+      queueLength: this.pendingQueue.length,
+    });
+  }
+
+  // [CUSTOM] Remove a session from pending queue.
+  private dequeuePendingSession(sessionId: string): boolean {
+    if (!this.pendingSessionIds.has(sessionId)) {
+      return false;
+    }
+
+    this.pendingSessionIds.delete(sessionId);
+    this.pendingQueue = this.pendingQueue.filter((id) => id !== sessionId);
+
+    log('[multiplexer-session-manager] session dequeued', {
+      sessionId,
+      queueLength: this.pendingQueue.length,
+    });
+
+    return true;
+  }
+
+  // [CUSTOM] Try to promote queued sessions when capacity frees up.
+  private async drainPendingQueue(): Promise<void> {
+    if (!this.enabled || !this.multiplexer) return;
+    if (this.drainingPendingQueue) return;
+
+    this.drainingPendingQueue = true;
+
+    try {
+      while (this.pendingQueue.length > 0) {
+        const sessionId = this.pendingQueue[0];
+        if (!sessionId) {
+          this.pendingQueue.shift();
+          continue;
+        }
+
+        if (!this.pendingSessionIds.has(sessionId)) {
+          this.pendingQueue.shift();
+          continue;
+        }
+
+        if (this.isTrackedOrSpawning(sessionId)) {
+          this.dequeuePendingSession(sessionId);
+          continue;
+        }
+
+        const known = this.knownSessions.get(sessionId);
+        if (!known) {
+          this.dequeuePendingSession(sessionId);
+          continue;
+        }
+
+        const result = await this.spawnKnownSession(sessionId, known, 'queue');
+
+        if (result === 'spawned') {
+          this.dequeuePendingSession(sessionId);
+          continue;
+        }
+
+        if (result === 'capacity') {
+          // Still full, keep FIFO head in queue and stop draining.
+          return;
+        }
+
+        // Non-capacity failures should not block the entire queue.
+        this.dequeuePendingSession(sessionId);
+      }
+    } finally {
+      this.drainingPendingQueue = false;
     }
   }
 
@@ -369,6 +554,10 @@ export class MultiplexerSessionManager {
 
     this.knownSessions.clear();
     this.spawningSessions.clear();
+    this.pendingQueue = [];
+    this.pendingSessionIds.clear();
+    this.drainingPendingQueue = false;
+    this.rebalancingRightBinaryLayout = false;
 
     log('[multiplexer-session-manager] cleanup complete');
   }

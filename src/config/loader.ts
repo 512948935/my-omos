@@ -291,6 +291,10 @@ function migrateTmuxToMultiplexer(config: PluginConfig): PluginConfig {
         type: 'tmux',
         layout: config.tmux.layout ?? 'main-vertical',
         main_pane_size: config.tmux.main_pane_size ?? 60,
+        // [CUSTOM] Preserve legacy max panel cap during migration.
+        max_panel_panes: config.tmux.max_panel_panes ?? 8,
+        // [CUSTOM] Preserve legacy per-column row cap during migration.
+        panel_rows_per_column: config.tmux.panel_rows_per_column ?? 3,
       },
     };
   }

@@ -44,6 +44,10 @@ const defaultMultiplexerConfig = {
   type: 'tmux' as const,
   layout: 'main-vertical' as const,
   main_pane_size: 60,
+  // [CUSTOM] Global panel cap baseline for queue tests.
+  max_panel_panes: 8,
+  // [CUSTOM] Default 2x3 panel capacity baseline for tests.
+  panel_rows_per_column: 3,
 };
 
 function createDeferred<T>() {
@@ -206,6 +210,99 @@ describe('MultiplexerSessionManager', () => {
 
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
     });
+
+    test('queues sessions on capacity and promotes when a slot frees up', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      mockMultiplexer.spawnPane
+        .mockResolvedValueOnce({ success: true, paneId: 'p-1' })
+        .mockResolvedValueOnce({ success: false, reason: 'capacity' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-2' });
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: { id: 'queue-1', parentID: 'parent-q', title: 'Worker One' },
+        },
+      });
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: { id: 'queue-2', parentID: 'parent-q', title: 'Worker Two' },
+        },
+      });
+
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'queue-1',
+          status: { type: 'idle' },
+        },
+      });
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(3);
+      expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
+        'queue-2',
+        'Worker Two',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+    });
+
+    test('drops queued sessions that finish before being displayed', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
+
+      mockMultiplexer.spawnPane
+        .mockResolvedValueOnce({ success: true, paneId: 'p-main' })
+        .mockResolvedValueOnce({ success: false, reason: 'capacity' });
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: { id: 'queue-done-1', parentID: 'parent-d', title: 'Main' },
+        },
+      });
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'queue-done-2',
+            parentID: 'parent-d',
+            title: 'Queued But Done',
+          },
+        },
+      });
+
+      // Queued session completes before it ever gets a pane.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'queue-done-2',
+          status: { type: 'idle' },
+        },
+      });
+
+      // Free one slot; finished queued session should not be respawned.
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'queue-done-1',
+          status: { type: 'idle' },
+        },
+      });
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(2);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-main');
+    });
   });
 
   describe('polling and closure', () => {
@@ -306,6 +403,90 @@ describe('MultiplexerSessionManager', () => {
       );
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
       expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+    });
+
+    test('rebalances right-binary panes after one session completes', async () => {
+      const ctx = createMockContext();
+      const manager = new MultiplexerSessionManager(ctx, {
+        ...defaultMultiplexerConfig,
+        layout: 'right-binary-8',
+      });
+
+      mockMultiplexer.spawnPane
+        .mockResolvedValueOnce({ success: true, paneId: 'p-1' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-2' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-3' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-2r' })
+        .mockResolvedValueOnce({ success: true, paneId: 'p-3r' });
+
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-1',
+            parentID: 'parent-rb',
+            title: 'Worker One',
+          },
+        },
+      });
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-2',
+            parentID: 'parent-rb',
+            title: 'Worker Two',
+          },
+        },
+      });
+      await manager.onSessionCreated({
+        type: 'session.created',
+        properties: {
+          info: {
+            id: 'rb-3',
+            parentID: 'parent-rb',
+            title: 'Worker Three',
+          },
+        },
+      });
+
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'rb-1',
+          status: { type: 'idle' },
+        },
+      });
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-2');
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-3');
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(5);
+      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
+        4,
+        'rb-2',
+        'Worker Two',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
+        5,
+        'rb-3',
+        'Worker Three',
+        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
+        '/test/directory',
+      );
+
+      await manager.onSessionStatus({
+        type: 'session.status',
+        properties: {
+          sessionID: 'rb-2',
+          status: { type: 'idle' },
+        },
+      });
+
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-2r');
     });
 
     test('does nothing on busy for unknown session', async () => {
