@@ -1,0 +1,13 @@
+请并行委派 9 个子代理来测试多列窗格的自动布局（测试左侧每列3个窗格的功能）：
+
+1) @explorer: 扫描 src/agents 目录下的文件。
+2) @explorer: 扫描 src/tools 目录下的文件。
+3) @explorer: 扫描 src/hooks 目录下的文件。
+4) @explorer: 扫描 src/config 目录下的文件。
+5) @explorer: 扫描 src/mcp 目录下的文件。
+6) @explorer: 扫描 src/multiplexer 目录下的文件。
+7) @librarian: 查一下 Node.js 的 child_process 文档。
+8) @librarian: 查一下 tmux 的 split-window 文档。
+9) @librarian: 查一下 OpenCode AI SDK 的插件开发、session 管理和工具注册文档。
+
+汇总各个结果。
