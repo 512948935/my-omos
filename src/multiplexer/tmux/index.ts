@@ -412,7 +412,7 @@ export class TmuxMultiplexer implements Multiplexer {
         );
         this.rightEvenTwoColInSingleColumnPhase = true;
         await this.requestRightEvenTwoColBoundaryReflow();
-      } else {
+      } else if (!isCurrentlyInSingleColumnPhase) {
         this.requestReflow();
       }
       return;
