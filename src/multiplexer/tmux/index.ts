@@ -692,7 +692,6 @@ export class TmuxMultiplexer implements Multiplexer {
     }
 
     if (count === 1) {
-      // [CUSTOM] 第 2 个 pane：先把右侧横向一分为二（形成左右两列）。
       const targetPaneId =
         this.pickRightEvenTwoColPaneByVerticalPosition(0, geometries, 'top') ??
         this.rightEvenTwoColPaneIds[0][0] ??
@@ -702,9 +701,9 @@ export class TmuxMultiplexer implements Multiplexer {
       }
 
       return {
-        column: 1,
+        column: 0,
         splitArgs: [
-          '-h',
+          '-v',
           '-p',
           `${TMUX_BINARY_SPLIT_PERCENT}`,
           ...this.targetArgsFor(targetPaneId),
@@ -712,8 +711,8 @@ export class TmuxMultiplexer implements Multiplexer {
       };
     }
 
-    if (count === 2 && this.rightEvenTwoColPaneIds[1].length === 1) {
-      // [CUSTOM] 第 3 个 pane：竖切 (-v) 左列 (column 0) 的上半区。
+    if (count === 2 && this.rightEvenTwoColPaneIds[1].length === 0) {
+      // [CUSTOM] 第 3 个 pane：横切 (-h) 上半区，分出右上。
       const topLeftPaneId =
         this.pickRightEvenTwoColPaneByVerticalPosition(0, geometries, 'top') ??
         this.rightEvenTwoColPaneIds[0][0] ??
@@ -723,9 +722,9 @@ export class TmuxMultiplexer implements Multiplexer {
       }
 
       return {
-        column: 0,
+        column: 1,
         splitArgs: [
-          '-v',
+          '-h',
           '-p',
           `${TMUX_BINARY_SPLIT_PERCENT}`,
           ...this.targetArgsFor(topLeftPaneId),
@@ -733,27 +732,28 @@ export class TmuxMultiplexer implements Multiplexer {
       };
     }
 
-    if (count === 3 && this.rightEvenTwoColPaneIds[0].length === 2) {
-      // [CUSTOM] 第 4 个 pane：竖切 (-v) 右列 (column 1)，补齐为田字（2x2）。
-      const rightPaneId =
+    if (count === 3 && this.rightEvenTwoColPaneIds[1].length === 1) {
+      // [CUSTOM] 第 4 个 pane：横切 (-h) 左列下半区，分出右下，补齐田字。
+      const bottomLeftPaneId =
         this.pickRightEvenTwoColPaneByVerticalPosition(
-          1,
+          0,
           geometries,
-          'top',
+          'bottom',
         ) ??
-        this.rightEvenTwoColPaneIds[1][0] ??
-        null;
-      if (!rightPaneId) {
+        this.rightEvenTwoColPaneIds[0][
+          this.rightEvenTwoColPaneIds[0].length - 1
+        ];
+      if (!bottomLeftPaneId) {
         return null;
       }
 
       return {
         column: 1,
         splitArgs: [
-          '-v',
+          '-h',
           '-p',
           `${TMUX_BINARY_SPLIT_PERCENT}`,
-          ...this.targetArgsFor(rightPaneId),
+          ...this.targetArgsFor(bottomLeftPaneId),
         ],
       };
     }
