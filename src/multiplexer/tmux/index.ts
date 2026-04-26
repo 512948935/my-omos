@@ -237,7 +237,7 @@ export class TmuxMultiplexer implements Multiplexer {
         // [CUSTOM] 仅在跨入 5+ 阶段时触发一次重构，后续维持堆叠。
         const isCurrentlyInSingleColumnPhase =
           this.rightEvenTwoColInSingleColumnPhase;
-        const countAfterSpawn = this.currentPanelPaneCount() + 1;
+        const countAfterSpawn = this.currentPanelPaneCount();
         const shouldEnterSingleColumnPhase =
           !isCurrentlyInSingleColumnPhase &&
           countAfterSpawn > TMUX_RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD;
@@ -250,7 +250,7 @@ export class TmuxMultiplexer implements Multiplexer {
           this.requestRightEvenTwoColBoundaryReflow().catch((e) =>
             log('[tmux] right-even-2col boundary reflow error:', e),
           );
-        } else {
+        } else if (!isCurrentlyInSingleColumnPhase) {
           this.requestReflow();
         }
       } else {
