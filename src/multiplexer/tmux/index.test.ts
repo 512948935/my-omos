@@ -819,7 +819,7 @@ describe('TmuxMultiplexer.findBinary', () => {
     const orientations = splitCalls.map((call) =>
       call.includes('-h') ? 'h' : 'v',
     );
-    expect(orientations).toEqual(['h', 'v', 'h', 'h', 'v', 'v', 'v', 'v']);
+    expect(orientations).toEqual(['h', 'h', 'v', 'v', 'v', 'v', 'v', 'v']);
 
     // [CUSTOM] 首次分裂固定 1/2；第 4 个 pane 直接补齐田字。
     expect(splitCalls[0]).toContain('50');
@@ -875,7 +875,7 @@ describe('TmuxMultiplexer.findBinary', () => {
       if (cmd === '/usr/bin/tmux' && arg === 'list-panes') {
         return createProcess(
           0,
-          `${['%a\t0\t0\t50\t10', '%b\t0\t11\t50\t30'].join('\n')}\n`,
+          `${['%a\t0\t0\t50\t10', '%b\t0\t11\t50\t30', '%c\t51\t0\t50\t40'].join('\n')}\n`,
         );
       }
 
@@ -903,17 +903,18 @@ describe('TmuxMultiplexer.findBinary', () => {
     ) as any;
 
     // [CUSTOM] Inject stale order: left column IDs are reversed.
-    multiplexer.rightEvenTwoColPaneIds = [['%b', '%a'], []];
+    multiplexer.rightEvenTwoColPaneIds = [['%b', '%a'], ['%c']];
     multiplexer.rightEvenTwoColColumnById = new Map([
       ['%b', 0],
       ['%a', 0],
+      ['%c', 1]
     ]);
-    multiplexer.openPanelPaneCount = 2;
+    multiplexer.openPanelPaneCount = 3;
     multiplexer.statusHiddenByPlugin = true;
 
     const result = await multiplexer.spawnPane(
-      're2-3',
-      'Worker 3',
+      're2-4',
+      'Worker 4',
       'http://localhost:4096',
       '/tmp/workspace',
     );
@@ -924,10 +925,10 @@ describe('TmuxMultiplexer.findBinary', () => {
       ([bin, sub]) => bin === '/usr/bin/tmux' && sub === 'split-window',
     );
     expect(splitCall).toBeDefined();
-    expect(splitCall).toContain('-h');
+    expect(splitCall).toContain('-v');
     expect(splitCall).toContain('-t');
-    // [CUSTOM] Should target top-left pane (%a), not stale array head (%b).
-    expect(splitCall).toContain('%a');
+    // [CUSTOM] Should target top pane in right column.
+    expect(splitCall).toContain('%c');
   });
 
   test('reflows right-even-2col 5+ panes by total-count average', async () => {
@@ -1118,10 +1119,10 @@ describe('TmuxMultiplexer.findBinary', () => {
       ([bin, sub]) => bin === '/usr/bin/tmux' && sub === 'split-window',
     );
     expect(splitCall).toBeDefined();
-    expect(splitCall).toContain('-h');
+    expect(splitCall).toContain('-v');
     expect(splitCall).toContain('-t');
     // [CUSTOM] Should target live bottom-left pane (%bottom), not stale index order.
-    expect(splitCall).toContain('%bottom');
+    expect(splitCall).toContain('%right');
   });
 
   test('uses live geometry when right-binary tracked order is stale', async () => {
