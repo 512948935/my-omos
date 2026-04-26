@@ -103,10 +103,10 @@ Presets can also be switched at runtime without restarting using the `/preset` c
 | `showStartupToast` | boolean | `true` | Show the startup activation toast (`oh-my-opencode-slim is active`) when OpenCode starts |
 | `autoUpdate` | boolean | `true` | Automatically install plugin updates in the background; set to `false` for notification-only mode |
 | `multiplexer.type` | string | `"none"` | Multiplexer mode: `auto`, `tmux`, `zellij`, or `none` |
-| `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `right-binary-8`, `tiled`, `even-horizontal`, `even-vertical`（`right-binary-8` 固定左右各 `1/2`，右侧先到“田字”后按“上下 1/2”递归扩展；当 pane 数减少时会自动重排以恢复均分；不使用 `main_pane_size`） |
+| `multiplexer.layout` | string | `"main-vertical"` | Layout preset: `main-vertical`, `main-horizontal`, `right-binary-8`, `right-even-8`, `right-even-2col-4`, `tiled`, `even-horizontal`, `even-vertical`（`right-binary-8` 固定左右各 `1/2`，右侧先到“田字”后按“上下 1/2”递归扩展；当 pane 数减少时会自动重排以恢复均分；不使用 `main_pane_size`。`right-even-8` 固定左右各 `1/2`，右侧单列均分高度，最多 8 个 pane。`right-even-2col-4` 固定左右各 `1/2`，`1-4` 保持田字阶段（`3` 为上二下一，`4` 为 2x2）；`4→5` 触发一次单列均分重构，`5-8` 继续纵向堆叠；回落到 `<5` 时再触发一次重构回田字） |
 | `multiplexer.main_pane_size` | number | `60` | Main pane size as percentage (20–80) |
-| `multiplexer.max_panel_panes` | integer | `8` | Global panel count cap (`1-8`)；超过时进入等待队列，空位出现后按 FIFO 尝试显示 |
-| `multiplexer.panel_rows_per_column` | integer | `3` | Tmux panel rows per column (`2-5`), fixed max 2 columns; layout capacity = `2 × rows` (range `[4-10]`), final visible cap still受 `max_panel_panes` 约束；when column 2 is active, main + each panel column are approximately `1/3` width（`right-binary-8` 布局不使用该项） |
+| `multiplexer.max_panel_panes` | integer | `8` | Global panel count cap (`1-8`)；超过时进入等待队列，空位出现后按 FIFO 尝试显示（`right-even-2col-4` 采用阈值触发重构：`4→5` 触发单列均分，`<5` 回落时触发田字重构） |
+| `multiplexer.panel_rows_per_column` | integer | `3` | Tmux panel rows per column (`2-5`), fixed max 2 columns; layout capacity = `2 × rows` (range `[4-10]`), final visible cap still受 `max_panel_panes` 约束；when column 2 is active, main + each panel column are approximately `1/3` width（`right-binary-8`、`right-even-8` 与 `right-even-2col-4` 布局不使用该项） |
 | `tmux.enabled` | boolean | `false` | Legacy alias for `multiplexer.type = "tmux"` |
 | `tmux.layout` | string | `"main-vertical"` | Legacy alias for `multiplexer.layout` |
 | `tmux.main_pane_size` | number | `60` | Legacy alias for `multiplexer.main_pane_size` |

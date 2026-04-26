@@ -118,6 +118,9 @@ export const MultiplexerLayoutSchema = z.enum([
   'main-horizontal', // Main pane on top, agents stacked below
   'main-vertical', // Main pane on left, agents stacked on right
   'right-binary-8', // [CUSTOM] Main left 1/2; right panel grows 1→2→4→8
+  'right-even-8', // [CUSTOM] Main left 1/2; right panel stacks evenly
+  // [CUSTOM] Main left 1/2; right panel uses balanced 2-column stack (stable 4)
+  'right-even-2col-4',
   'tiled', // All panes equal size grid
   'even-horizontal', // All panes side by side
   'even-vertical', // All panes stacked vertically

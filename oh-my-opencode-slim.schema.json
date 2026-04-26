@@ -408,6 +408,8 @@
             "main-horizontal",
             "main-vertical",
             "right-binary-8",
+            "right-even-8",
+            "right-even-2col-4",
             "tiled",
             "even-horizontal",
             "even-vertical"
@@ -445,6 +447,8 @@
             "main-horizontal",
             "main-vertical",
             "right-binary-8",
+            "right-even-8",
+            "right-even-2col-4",
             "tiled",
             "even-horizontal",
             "even-vertical"

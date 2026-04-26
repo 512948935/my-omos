@@ -46,7 +46,10 @@ interface SessionEvent {
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const SESSION_MISSING_GRACE_MS = POLL_INTERVAL_BACKGROUND_MS * 3;
 const RIGHT_BINARY_LAYOUT = 'right-binary-8' as const;
-const RIGHT_BINARY_REBALANCE_WAIT_MS = 15;
+const RIGHT_EVEN_TWO_COL_LAYOUT = 'right-even-2col-4' as const;
+const RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD = 4;
+const RIGHT_BINARY_REBALANCE_WAIT_MS = 30;
+const STRUCTURED_LAYOUT_REBALANCE_DEBOUNCE_MS = 600;
 
 /**
  * Tracks child sessions and spawns/closes multiplexer panes for them.
@@ -69,8 +72,13 @@ export class MultiplexerSessionManager {
   private pendingQueue: string[] = [];
   private pendingSessionIds = new Set<string>();
   private drainingPendingQueue = false;
-  // [CUSTOM] Guard against nested right-binary rebalance cycles.
+  // [CUSTOM] Guard against nested structured-layout rebalance cycles.
   private rebalancingRightBinaryLayout = false;
+  // [CUSTOM] Debounce structured-layout rebalance under rapid churn.
+  private structuredRebalanceTimer: ReturnType<typeof setTimeout> | undefined;
+  private structuredRebalanceWaiters: Array<() => void> = [];
+  // [CUSTOM] Track structured-layout close pipelines before rebalance is scheduled.
+  private structuredRebalancePendingClosures = 0;
   private pollInterval?: ReturnType<typeof setInterval>;
   private enabled = false;
 
@@ -245,6 +253,11 @@ export class MultiplexerSessionManager {
     }
 
     this.closingSessions.add(sessionId);
+    const shouldGuardStructuredChurn = this.shouldRebalanceRightBinaryLayout();
+    let releasedStructuredGuard = false;
+    if (shouldGuardStructuredChurn) {
+      this.structuredRebalancePendingClosures += 1;
+    }
 
     try {
       // [CUSTOM] 等待 right-binary 重排完成，避免使用重排中的过期 paneId。
@@ -258,11 +271,57 @@ export class MultiplexerSessionManager {
         paneId: tracked.paneId,
       });
 
+      const trackedCountBeforeClose = this.sessions.size;
       await this.multiplexer.closePane(tracked.paneId);
       this.sessions.delete(sessionId);
 
-      // [CUSTOM] right-binary 布局在 pane 数变化后需要重算并重排。
-      await this.rebalanceRightBinaryLayoutIfNeeded();
+      const trackedCountAfterClose = this.sessions.size;
+      const shouldRebalanceForLayout =
+        this.shouldScheduleStructuredRebalanceOnClose(
+          trackedCountBeforeClose,
+          trackedCountAfterClose,
+        );
+
+      const shouldSkipStructuredRebalance =
+        shouldRebalanceForLayout &&
+        trackedCountBeforeClose === trackedCountAfterClose + 1 &&
+        this.pendingQueue.length > 0 &&
+        trackedCountAfterClose > 0;
+
+      if (shouldSkipStructuredRebalance) {
+        // [CUSTOM] 数量将被 queue 立即补齐时，避免反复重建同一布局。
+        log(
+          '[multiplexer-session-manager] skip structured rebalance on backfill',
+          {
+            sessionId,
+            trackedCountBeforeClose,
+            trackedCountAfterClose,
+            pendingQueueLength: this.pendingQueue.length,
+          },
+        );
+      } else if (shouldRebalanceForLayout) {
+        // [CUSTOM] 结构化布局在 pane 变动后做防抖重建，降低快速切换抖动。
+        await this.requestStructuredLayoutRebalance();
+      } else {
+        // [CUSTOM] right-even-2col-4 仅在 5->4 阈值回落时触发重建。
+        log(
+          '[multiplexer-session-manager] skip structured rebalance on non-threshold close',
+          {
+            sessionId,
+            trackedCountBeforeClose,
+            trackedCountAfterClose,
+            layout: this.multiplexerLayout,
+          },
+        );
+      }
+
+      if (
+        shouldGuardStructuredChurn &&
+        this.structuredRebalancePendingClosures > 0
+      ) {
+        this.structuredRebalancePendingClosures -= 1;
+        releasedStructuredGuard = true;
+      }
 
       if (this.sessions.size === 0) {
         this.stopPolling();
@@ -270,27 +329,109 @@ export class MultiplexerSessionManager {
 
       await this.drainPendingQueue();
     } finally {
+      if (
+        shouldGuardStructuredChurn &&
+        !releasedStructuredGuard &&
+        this.structuredRebalancePendingClosures > 0
+      ) {
+        this.structuredRebalancePendingClosures -= 1;
+      }
       this.closingSessions.delete(sessionId);
     }
   }
 
-  // [CUSTOM] Whether we should rebuild pane placement for right-binary mode.
+  // [CUSTOM] Whether we should rebuild pane placement for structured layouts.
   private shouldRebalanceRightBinaryLayout(): boolean {
-    return this.multiplexerLayout === RIGHT_BINARY_LAYOUT;
+    return (
+      this.multiplexerLayout === RIGHT_BINARY_LAYOUT ||
+      this.multiplexerLayout === RIGHT_EVEN_TWO_COL_LAYOUT
+    );
   }
 
-  // [CUSTOM] Block churn handling until right-binary rebalance finishes.
-  private async waitForRightBinaryRebalance(): Promise<void> {
+  // [CUSTOM] Structured rebalance on close: binary always; 2col only on 5->4 threshold crossing.
+  private shouldScheduleStructuredRebalanceOnClose(
+    trackedCountBeforeClose: number,
+    trackedCountAfterClose: number,
+  ): boolean {
+    if (this.multiplexerLayout === RIGHT_BINARY_LAYOUT) {
+      return true;
+    }
+
+    if (this.multiplexerLayout === RIGHT_EVEN_TWO_COL_LAYOUT) {
+      return (
+        trackedCountBeforeClose > RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD &&
+        trackedCountAfterClose <= RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD
+      );
+    }
+
+    return false;
+  }
+
+  // [CUSTOM] Block churn handling until structured-layout rebalance finishes.
+  private async waitForRightBinaryRebalance(
+    includeScheduled = false,
+  ): Promise<void> {
     if (!this.shouldRebalanceRightBinaryLayout()) return;
 
-    while (this.rebalancingRightBinaryLayout) {
+    while (
+      this.rebalancingRightBinaryLayout ||
+      (includeScheduled &&
+        (!!this.structuredRebalanceTimer ||
+          this.structuredRebalancePendingClosures > 0))
+    ) {
       await new Promise((resolve) =>
         setTimeout(resolve, RIGHT_BINARY_REBALANCE_WAIT_MS),
       );
     }
   }
 
-  // [CUSTOM] Rebuild remaining right-binary panes to keep equal splits.
+  // [CUSTOM] Clear pending structured-layout rebalance debounce requests.
+  private cancelStructuredLayoutRebalanceRequest(): void {
+    if (this.structuredRebalanceTimer) {
+      clearTimeout(this.structuredRebalanceTimer);
+      this.structuredRebalanceTimer = undefined;
+    }
+
+    if (this.structuredRebalanceWaiters.length > 0) {
+      const waiters = this.structuredRebalanceWaiters.splice(0);
+      for (const done of waiters) {
+        done();
+      }
+    }
+  }
+
+  // [CUSTOM] Debounced request to rebuild structured layouts.
+  private requestStructuredLayoutRebalance(): Promise<void> {
+    if (!this.shouldRebalanceRightBinaryLayout()) {
+      return Promise.resolve();
+    }
+
+    if (this.sessions.size <= 1) {
+      this.cancelStructuredLayoutRebalanceRequest();
+      return Promise.resolve();
+    }
+
+    return new Promise((resolve) => {
+      this.structuredRebalanceWaiters.push(resolve);
+
+      if (this.structuredRebalanceTimer) {
+        clearTimeout(this.structuredRebalanceTimer);
+      }
+
+      this.structuredRebalanceTimer = setTimeout(() => {
+        this.structuredRebalanceTimer = undefined;
+        const waiters = this.structuredRebalanceWaiters.splice(0);
+
+        void this.rebalanceRightBinaryLayoutIfNeeded().finally(() => {
+          for (const done of waiters) {
+            done();
+          }
+        });
+      }, STRUCTURED_LAYOUT_REBALANCE_DEBOUNCE_MS);
+    });
+  }
+
+  // [CUSTOM] Rebuild remaining structured-layout panes to canonical splits.
   private async rebalanceRightBinaryLayoutIfNeeded(): Promise<void> {
     if (!this.multiplexer) return;
     if (!this.shouldRebalanceRightBinaryLayout()) return;
@@ -304,8 +445,9 @@ export class MultiplexerSessionManager {
         .sort((a, b) => a.createdAt - b.createdAt)
         .map((tracked) => ({ ...tracked }));
 
-      log('[multiplexer-session-manager] rebalancing right-binary panes', {
+      log('[multiplexer-session-manager] rebalancing structured-layout panes', {
         count: survivors.length,
+        layout: this.multiplexerLayout,
       });
 
       // [CUSTOM] 先清空旧 pane，再按当前会话顺序重新挂载，确保均分。
@@ -313,7 +455,12 @@ export class MultiplexerSessionManager {
         await this.multiplexer.closePane(tracked.paneId);
       }
 
-      for (const tracked of survivors) {
+      for (let index = 0; index < survivors.length; index += 1) {
+        const tracked = survivors[index];
+        if (!tracked) {
+          continue;
+        }
+
         const current = this.sessions.get(tracked.sessionId);
         if (!current) {
           continue;
@@ -344,16 +491,15 @@ export class MultiplexerSessionManager {
           current.paneId = paneResult.paneId;
           current.lastSeenAt = Date.now();
           current.missingSince = undefined;
-          continue;
+        } else {
+          log('[multiplexer-session-manager] rebalance deferred to queue', {
+            sessionId: tracked.sessionId,
+            reason: paneResult.reason ?? 'unknown',
+          });
+
+          this.sessions.delete(tracked.sessionId);
+          this.enqueuePendingSession(tracked.sessionId);
         }
-
-        log('[multiplexer-session-manager] rebalance deferred to queue', {
-          sessionId: tracked.sessionId,
-          reason: paneResult.reason ?? 'unknown',
-        });
-
-        this.sessions.delete(tracked.sessionId);
-        this.enqueuePendingSession(tracked.sessionId);
       }
     } finally {
       this.rebalancingRightBinaryLayout = false;
@@ -379,8 +525,8 @@ export class MultiplexerSessionManager {
     known: KnownSession,
     trigger: 'created' | 'busy' | 'queue',
   ): Promise<SpawnAttemptResult> {
-    // [CUSTOM] 等待 right-binary 重排完成，避免重排与新增 pane 交错。
-    await this.waitForRightBinaryRebalance();
+    // [CUSTOM] 等待结构化布局重排（含已调度的防抖窗口）避免新增与重建交错。
+    await this.waitForRightBinaryRebalance(true);
 
     if (!this.multiplexer) return 'skipped';
     if (this.isTrackedOrSpawning(sessionId)) return 'skipped';
@@ -404,7 +550,8 @@ export class MultiplexerSessionManager {
       if (this.sessions.has(sessionId)) return 'skipped';
 
       const logMessageByTrigger = {
-        created: '[multiplexer-session-manager] child session created, spawning pane',
+        created:
+          '[multiplexer-session-manager] child session created, spawning pane',
         busy: '[multiplexer-session-manager] child session busy again, respawning pane',
         queue:
           '[multiplexer-session-manager] dequeued child session, spawning pane',
@@ -589,6 +736,8 @@ export class MultiplexerSessionManager {
     this.pendingSessionIds.clear();
     this.drainingPendingQueue = false;
     this.rebalancingRightBinaryLayout = false;
+    this.structuredRebalancePendingClosures = 0;
+    this.cancelStructuredLayoutRebalanceRequest();
 
     log('[multiplexer-session-manager] cleanup complete');
   }

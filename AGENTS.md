@@ -65,6 +65,45 @@ When modifying session management code, understand the shutdown sequence:
 3. `session.deleted` event handler in `src/index.ts` triggers pane cleanup via `MultiplexerSessionManager`
 4. After changes: build → test with `@explorer` / `@librarian` tasks → verify no orphaned `opencode attach` processes
 
+## Multiplexer Layout Checklist
+
+> [CUSTOM] Layout source of truth: `src/config/schema.ts` +
+> `src/multiplexer/tmux/index.ts` +
+> `docs/multiplexer-integration.md`.
+
+### Multiplexer types
+
+| `multiplexer.type` | Effect | Recommended when |
+|---|---|---|
+| `auto` | Auto-detect tmux/zellij | Default for mixed environments |
+| `tmux` | Force tmux integration | Need full tmux layout control |
+| `zellij` | Force zellij integration | You primarily use zellij |
+| `none` | Disable pane mirroring | No multiplexer panes needed |
+
+### Tmux layouts (with behavior)
+
+| `multiplexer.layout` | Effect summary | Notes |
+|---|---|---|
+| `main-vertical` | Main pane left, panels stacked right | General default |
+| `main-horizontal` | Main pane top, panels stacked bottom | Useful on wide screens |
+| `right-binary-8` | Main fixed left `1/2`; right grows `1→2→4→8` | Rebalance on close; fixed max `8`; ignores `panel_rows_per_column` |
+| `right-even-8` | Main fixed left `1/2`; right single-column even stack | Stable/even vertical splits; fixed max `8`; ignores `panel_rows_per_column` |
+| `right-even-2col-4` | Main fixed left `1/2`; `3` is top-2/bottom-1, `4` becomes 2x2 | Threshold-triggered reflow: `4→5` reflows once to single-column average, `5-8` stacks vertically; dropping back to `<5` triggers 田字 rebuild; fixed max `8`; ignores `panel_rows_per_column` |
+| `tiled` | All panes tiled evenly | Max visibility, less main focus |
+| `even-horizontal` | All panes side by side | Good for ultra-wide screens |
+| `even-vertical` | All panes stacked vertically | Simple, but can get short |
+
+### Layout update checklist
+
+When adding/modifying layout behavior, update these together:
+
+1. `src/config/schema.ts` (enum + type)
+2. `src/multiplexer/tmux/index.ts` (split/reflow/track/untrack)
+3. `src/multiplexer/tmux/index.test.ts` (behavioral tests)
+4. `docs/configuration.md` (option table)
+5. `docs/multiplexer-integration.md` (layout guide)
+6. `docs/change-records/YYYY-MM-DD-*.md` (change record)
+
 ## Development Workflow
 
 1. Make changes
