@@ -407,7 +407,6 @@
           "enum": [
             "main-horizontal",
             "main-vertical",
-            "right-binary-8",
             "right-even-8",
             "right-even-2col-4",
             "tiled",
@@ -446,7 +445,6 @@
           "enum": [
             "main-horizontal",
             "main-vertical",
-            "right-binary-8",
             "right-even-8",
             "right-even-2col-4",
             "tiled",

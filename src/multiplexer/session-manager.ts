@@ -45,11 +45,11 @@ interface SessionEvent {
 
 const SESSION_TIMEOUT_MS = 10 * 60 * 1000;
 const SESSION_MISSING_GRACE_MS = POLL_INTERVAL_BACKGROUND_MS * 3;
-const RIGHT_BINARY_LAYOUT = 'right-binary-8' as const;
 const RIGHT_EVEN_TWO_COL_LAYOUT = 'right-even-2col-4' as const;
 const RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD = 4;
-const RIGHT_BINARY_REBALANCE_WAIT_MS = 30;
-const STRUCTURED_LAYOUT_REBALANCE_DEBOUNCE_MS = 600;
+const STRUCTURED_LAYOUT_REBALANCE_WAIT_MS = 30;
+// [CUSTOM] 阈值重建防抖窗口：3 秒内最多触发一次。
+const STRUCTURED_LAYOUT_REBALANCE_DEBOUNCE_MS = 3000;
 
 /**
  * Tracks child sessions and spawns/closes multiplexer panes for them.
@@ -65,7 +65,11 @@ export class MultiplexerSessionManager {
   private multiplexerLayout: MultiplexerConfig['layout'];
   private sessions = new Map<string, TrackedSession>();
   private knownSessions = new Map<string, KnownSession>();
-  private spawningSessions = new Set<string>();
+  // [CUSTOM] Track in-flight/queued spawn by token to avoid cross-release races.
+  private spawningSessions = new Map<string, number>();
+  private nextSpawnToken = 1;
+  // [CUSTOM] Serialize pane spawn pipeline to keep spawn order stable.
+  private spawnOperationQueue: Promise<void> = Promise.resolve();
   // [CUSTOM] Deduplicate concurrent close requests for the same session.
   private closingSessions = new Set<string>();
   // [CUSTOM] Queue sessions waiting for pane capacity.
@@ -73,7 +77,7 @@ export class MultiplexerSessionManager {
   private pendingSessionIds = new Set<string>();
   private drainingPendingQueue = false;
   // [CUSTOM] Guard against nested structured-layout rebalance cycles.
-  private rebalancingRightBinaryLayout = false;
+  private rebalancingStructuredLayout = false;
   // [CUSTOM] Debounce structured-layout rebalance under rapid churn.
   private structuredRebalanceTimer: ReturnType<typeof setTimeout> | undefined;
   private structuredRebalanceWaiters: Array<() => void> = [];
@@ -253,15 +257,15 @@ export class MultiplexerSessionManager {
     }
 
     this.closingSessions.add(sessionId);
-    const shouldGuardStructuredChurn = this.shouldRebalanceRightBinaryLayout();
+    const shouldGuardStructuredChurn = this.shouldRebalanceStructuredLayout();
     let releasedStructuredGuard = false;
     if (shouldGuardStructuredChurn) {
       this.structuredRebalancePendingClosures += 1;
     }
 
     try {
-      // [CUSTOM] 等待 right-binary 重排完成，避免使用重排中的过期 paneId。
-      await this.waitForRightBinaryRebalance();
+      // [CUSTOM] 等待结构化布局重排完成，避免使用重排中的过期 paneId。
+      await this.waitForStructuredRebalance();
 
       const tracked = this.sessions.get(sessionId);
       if (!tracked || !this.multiplexer) return;
@@ -276,6 +280,16 @@ export class MultiplexerSessionManager {
       this.sessions.delete(sessionId);
 
       const trackedCountAfterClose = this.sessions.size;
+
+      if (
+        shouldGuardStructuredChurn &&
+        this.structuredRebalancePendingClosures > 0
+      ) {
+        // [CUSTOM] closePane 已完成，释放 close 流水线守卫，允许后续 spawn 判定是否取消待执行重建。
+        this.structuredRebalancePendingClosures -= 1;
+        releasedStructuredGuard = true;
+      }
+
       const shouldRebalanceForLayout =
         this.shouldScheduleStructuredRebalanceOnClose(
           trackedCountBeforeClose,
@@ -315,14 +329,6 @@ export class MultiplexerSessionManager {
         );
       }
 
-      if (
-        shouldGuardStructuredChurn &&
-        this.structuredRebalancePendingClosures > 0
-      ) {
-        this.structuredRebalancePendingClosures -= 1;
-        releasedStructuredGuard = true;
-      }
-
       if (this.sessions.size === 0) {
         this.stopPolling();
       }
@@ -341,22 +347,15 @@ export class MultiplexerSessionManager {
   }
 
   // [CUSTOM] Whether we should rebuild pane placement for structured layouts.
-  private shouldRebalanceRightBinaryLayout(): boolean {
-    return (
-      this.multiplexerLayout === RIGHT_BINARY_LAYOUT ||
-      this.multiplexerLayout === RIGHT_EVEN_TWO_COL_LAYOUT
-    );
+  private shouldRebalanceStructuredLayout(): boolean {
+    return this.multiplexerLayout === RIGHT_EVEN_TWO_COL_LAYOUT;
   }
 
-  // [CUSTOM] Structured rebalance on close: binary always; 2col only on 5->4 threshold crossing.
+  // [CUSTOM] Structured rebalance on close: 2col only on 5->4 threshold crossing.
   private shouldScheduleStructuredRebalanceOnClose(
     trackedCountBeforeClose: number,
     trackedCountAfterClose: number,
   ): boolean {
-    if (this.multiplexerLayout === RIGHT_BINARY_LAYOUT) {
-      return true;
-    }
-
     if (this.multiplexerLayout === RIGHT_EVEN_TWO_COL_LAYOUT) {
       return (
         trackedCountBeforeClose > RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD &&
@@ -368,19 +367,30 @@ export class MultiplexerSessionManager {
   }
 
   // [CUSTOM] Block churn handling until structured-layout rebalance finishes.
-  private async waitForRightBinaryRebalance(
+  private async waitForStructuredRebalance(
     includeScheduled = false,
   ): Promise<void> {
-    if (!this.shouldRebalanceRightBinaryLayout()) return;
+    if (!this.shouldRebalanceStructuredLayout()) return;
 
     while (
-      this.rebalancingRightBinaryLayout ||
+      this.rebalancingStructuredLayout ||
       (includeScheduled &&
         (!!this.structuredRebalanceTimer ||
           this.structuredRebalancePendingClosures > 0))
     ) {
       await new Promise((resolve) =>
-        setTimeout(resolve, RIGHT_BINARY_REBALANCE_WAIT_MS),
+        setTimeout(resolve, STRUCTURED_LAYOUT_REBALANCE_WAIT_MS),
+      );
+    }
+  }
+
+  // [CUSTOM] Wait close pipelines to settle before deciding debounce-cancel.
+  private async waitForStructuredClosePipelines(): Promise<void> {
+    if (!this.shouldRebalanceStructuredLayout()) return;
+
+    while (this.structuredRebalancePendingClosures > 0) {
+      await new Promise((resolve) =>
+        setTimeout(resolve, STRUCTURED_LAYOUT_REBALANCE_WAIT_MS),
       );
     }
   }
@@ -400,9 +410,29 @@ export class MultiplexerSessionManager {
     }
   }
 
+  // [CUSTOM] Serialize pane spawn operations to preserve create ordering.
+  private async runSerializedSpawnOperation<T>(
+    operation: () => Promise<T>,
+  ): Promise<T> {
+    const previous = this.spawnOperationQueue;
+    let releaseCurrent!: () => void;
+
+    this.spawnOperationQueue = new Promise<void>((resolve) => {
+      releaseCurrent = resolve;
+    });
+
+    await previous;
+
+    try {
+      return await operation();
+    } finally {
+      releaseCurrent();
+    }
+  }
+
   // [CUSTOM] Debounced request to rebuild structured layouts.
   private requestStructuredLayoutRebalance(): Promise<void> {
-    if (!this.shouldRebalanceRightBinaryLayout()) {
+    if (!this.shouldRebalanceStructuredLayout()) {
       return Promise.resolve();
     }
 
@@ -422,7 +452,7 @@ export class MultiplexerSessionManager {
         this.structuredRebalanceTimer = undefined;
         const waiters = this.structuredRebalanceWaiters.splice(0);
 
-        void this.rebalanceRightBinaryLayoutIfNeeded().finally(() => {
+        void this.rebalanceStructuredLayoutIfNeeded().finally(() => {
           for (const done of waiters) {
             done();
           }
@@ -431,14 +461,47 @@ export class MultiplexerSessionManager {
     });
   }
 
+  // [CUSTOM] 5->4 后若马上有新会话补回 >4，取消待执行重建，避免来回闪烁。
+  private maybeCancelScheduledStructuredRebalanceBeforeSpawn(): void {
+    if (!this.shouldRebalanceStructuredLayout()) {
+      return;
+    }
+
+    if (!this.structuredRebalanceTimer || this.rebalancingStructuredLayout) {
+      return;
+    }
+
+    // [CUSTOM] 关闭流程尚未结束时，仍保持等待，避免与 close 交错。
+    if (this.structuredRebalancePendingClosures > 0) {
+      return;
+    }
+
+    const projectedCountAfterSpawn = this.sessions.size + 1;
+    if (
+      projectedCountAfterSpawn <= RIGHT_EVEN_TWO_COL_SINGLE_COLUMN_THRESHOLD
+    ) {
+      return;
+    }
+
+    log(
+      '[multiplexer-session-manager] cancel scheduled structured rebalance before spawn',
+      {
+        currentCount: this.sessions.size,
+        projectedCountAfterSpawn,
+      },
+    );
+
+    this.cancelStructuredLayoutRebalanceRequest();
+  }
+
   // [CUSTOM] Rebuild remaining structured-layout panes to canonical splits.
-  private async rebalanceRightBinaryLayoutIfNeeded(): Promise<void> {
+  private async rebalanceStructuredLayoutIfNeeded(): Promise<void> {
     if (!this.multiplexer) return;
-    if (!this.shouldRebalanceRightBinaryLayout()) return;
-    if (this.rebalancingRightBinaryLayout) return;
+    if (!this.shouldRebalanceStructuredLayout()) return;
+    if (this.rebalancingStructuredLayout) return;
     if (this.sessions.size <= 1) return;
 
-    this.rebalancingRightBinaryLayout = true;
+    this.rebalancingStructuredLayout = true;
 
     try {
       const survivors = Array.from(this.sessions.values())
@@ -502,7 +565,7 @@ export class MultiplexerSessionManager {
         }
       }
     } finally {
-      this.rebalancingRightBinaryLayout = false;
+      this.rebalancingStructuredLayout = false;
     }
   }
 
@@ -525,97 +588,116 @@ export class MultiplexerSessionManager {
     known: KnownSession,
     trigger: 'created' | 'busy' | 'queue',
   ): Promise<SpawnAttemptResult> {
-    // [CUSTOM] 等待结构化布局重排（含已调度的防抖窗口）避免新增与重建交错。
-    await this.waitForRightBinaryRebalance(true);
+    if (this.isTrackedOrSpawning(sessionId)) {
+      return 'skipped';
+    }
 
-    if (!this.multiplexer) return 'skipped';
-    if (this.isTrackedOrSpawning(sessionId)) return 'skipped';
+    const spawnToken = this.nextSpawnToken;
+    this.nextSpawnToken += 1;
+    this.spawningSessions.set(sessionId, spawnToken);
 
-    this.spawningSessions.add(sessionId);
+    return this.runSerializedSpawnOperation(async () => {
+      // [CUSTOM] 先等关闭流水线结束，再决定是否跳过待执行阈值重建。
+      await this.waitForStructuredRebalance();
+      await this.waitForStructuredClosePipelines();
 
-    try {
-      const serverRunning = await isServerRunning(this.serverUrl);
-      if (!serverRunning) {
-        log(
-          '[multiplexer-session-manager] server not running, skipping spawn',
-          {
-            serverUrl: this.serverUrl,
-            sessionId,
-            trigger,
-          },
-        );
-        return 'skipped';
-      }
+      // [CUSTOM] 5->4 阈值回落若被新会话迅速补回 >4，跳过待执行重建。
+      this.maybeCancelScheduledStructuredRebalanceBeforeSpawn();
 
+      // [CUSTOM] 等待结构化布局重排（含已调度防抖）避免新增与重建交错。
+      await this.waitForStructuredRebalance(true);
+
+      if (!this.multiplexer) return 'skipped';
+      if (this.spawningSessions.get(sessionId) !== spawnToken) return 'skipped';
       if (this.sessions.has(sessionId)) return 'skipped';
 
-      const logMessageByTrigger = {
-        created:
-          '[multiplexer-session-manager] child session created, spawning pane',
-        busy: '[multiplexer-session-manager] child session busy again, respawning pane',
-        queue:
-          '[multiplexer-session-manager] dequeued child session, spawning pane',
-      } as const;
+      try {
+        const serverRunning = await isServerRunning(this.serverUrl);
+        if (!serverRunning) {
+          log(
+            '[multiplexer-session-manager] server not running, skipping spawn',
+            {
+              serverUrl: this.serverUrl,
+              sessionId,
+              trigger,
+            },
+          );
+          return 'skipped';
+        }
 
-      log(logMessageByTrigger[trigger], {
-        sessionId,
-        parentId: known.parentId,
-        title: known.title,
-      });
+        if (this.sessions.has(sessionId)) return 'skipped';
 
-      const paneResult = await this.multiplexer
-        .spawnPane(sessionId, known.title, this.serverUrl, known.directory)
-        .catch((err) => {
-          log('[multiplexer-session-manager] failed to spawn pane', {
-            error: String(err),
-            trigger,
-          });
-          return {
-            success: false,
-            paneId: undefined,
-            reason: 'error',
-          };
-        });
+        const logMessageByTrigger = {
+          created:
+            '[multiplexer-session-manager] child session created, spawning pane',
+          busy:
+            '[multiplexer-session-manager] child session busy again, respawning pane',
+          queue:
+            '[multiplexer-session-manager] dequeued child session, spawning pane',
+        } as const;
 
-      if (paneResult.success && paneResult.paneId) {
-        const now = Date.now();
-        this.sessions.set(sessionId, {
+        log(logMessageByTrigger[trigger], {
           sessionId,
-          paneId: paneResult.paneId,
           parentId: known.parentId,
           title: known.title,
-          directory: known.directory,
-          createdAt: now,
-          lastSeenAt: now,
         });
 
-        log('[multiplexer-session-manager] pane spawned', {
+        const paneResult = await this.multiplexer
+          .spawnPane(sessionId, known.title, this.serverUrl, known.directory)
+          .catch((err) => {
+            log('[multiplexer-session-manager] failed to spawn pane', {
+              error: String(err),
+              trigger,
+            });
+            return {
+              success: false,
+              paneId: undefined,
+              reason: 'error',
+            };
+          });
+
+        if (paneResult.success && paneResult.paneId) {
+          const now = Date.now();
+          this.sessions.set(sessionId, {
+            sessionId,
+            paneId: paneResult.paneId,
+            parentId: known.parentId,
+            title: known.title,
+            directory: known.directory,
+            createdAt: now,
+            lastSeenAt: now,
+          });
+
+          log('[multiplexer-session-manager] pane spawned', {
+            sessionId,
+            paneId: paneResult.paneId,
+            trigger,
+          });
+
+          this.startPolling();
+          return 'spawned';
+        }
+
+        if (paneResult.reason === 'capacity') {
+          log('[multiplexer-session-manager] pane capacity reached, queueing', {
+            sessionId,
+            trigger,
+          });
+          return 'capacity';
+        }
+
+        log('[multiplexer-session-manager] pane spawn failed', {
           sessionId,
-          paneId: paneResult.paneId,
           trigger,
+          reason: paneResult.reason ?? 'unknown',
         });
-
-        this.startPolling();
-        return 'spawned';
+        return 'failed';
+      } finally {
+        if (this.spawningSessions.get(sessionId) === spawnToken) {
+          this.spawningSessions.delete(sessionId);
+        }
       }
-
-      if (paneResult.reason === 'capacity') {
-        log('[multiplexer-session-manager] pane capacity reached, queueing', {
-          sessionId,
-          trigger,
-        });
-        return 'capacity';
-      }
-
-      log('[multiplexer-session-manager] pane spawn failed', {
-        sessionId,
-        trigger,
-        reason: paneResult.reason ?? 'unknown',
-      });
-      return 'failed';
-    } finally {
-      this.spawningSessions.delete(sessionId);
-    }
+    });
   }
 
   // [CUSTOM] Enqueue a session waiting for free pane capacity.
@@ -735,7 +817,7 @@ export class MultiplexerSessionManager {
     this.pendingQueue = [];
     this.pendingSessionIds.clear();
     this.drainingPendingQueue = false;
-    this.rebalancingRightBinaryLayout = false;
+    this.rebalancingStructuredLayout = false;
     this.structuredRebalancePendingClosures = 0;
     this.cancelStructuredLayoutRebalanceRequest();
 

@@ -86,7 +86,6 @@ When modifying session management code, understand the shutdown sequence:
 |---|---|---|
 | `main-vertical` | Main pane left, panels stacked right | General default |
 | `main-horizontal` | Main pane top, panels stacked bottom | Useful on wide screens |
-| `right-binary-8` | Main fixed left `1/2`; right grows `1→2→4→8` | Rebalance on close; fixed max `8`; ignores `panel_rows_per_column` |
 | `right-even-8` | Main fixed left `1/2`; right single-column even stack | Stable/even vertical splits; fixed max `8`; ignores `panel_rows_per_column` |
 | `right-even-2col-4` | Main fixed left `1/2`; `3` is top-2/bottom-1, `4` becomes 2x2 | Threshold-triggered reflow: `4→5` reflows once to single-column average, `5-8` stacks vertically; dropping back to `<5` triggers 田字 rebuild; fixed max `8`; ignores `panel_rows_per_column` |
 | `tiled` | All panes tiled evenly | Max visibility, less main focus |

@@ -182,9 +182,13 @@ describe('MultiplexerSessionManager', () => {
         ctx,
         defaultMultiplexerConfig,
       );
+      const spawnStarted = createDeferred<void>();
       const deferred = createDeferred<{ success: true; paneId: string }>();
 
-      mockMultiplexer.spawnPane.mockImplementationOnce(() => deferred.promise);
+      mockMultiplexer.spawnPane.mockImplementationOnce(async () => {
+        spawnStarted.resolve();
+        return deferred.promise;
+      });
 
       const event = {
         type: 'session.created',
@@ -200,7 +204,7 @@ describe('MultiplexerSessionManager', () => {
       const firstCreate = manager.onSessionCreated(event);
       const secondCreate = manager.onSessionCreated(event);
 
-      await Promise.resolve();
+      await spawnStarted.promise;
       await Promise.resolve();
 
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
@@ -458,90 +462,6 @@ describe('MultiplexerSessionManager', () => {
       expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
     });
 
-    test('rebalances right-binary panes after one session completes', async () => {
-      const ctx = createMockContext();
-      const manager = new MultiplexerSessionManager(ctx, {
-        ...defaultMultiplexerConfig,
-        layout: 'right-binary-8',
-      });
-
-      mockMultiplexer.spawnPane
-        .mockResolvedValueOnce({ success: true, paneId: 'p-1' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-2' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-3' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-2r' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-3r' });
-
-      await manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-1',
-            parentID: 'parent-rb',
-            title: 'Worker One',
-          },
-        },
-      });
-      await manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-2',
-            parentID: 'parent-rb',
-            title: 'Worker Two',
-          },
-        },
-      });
-      await manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-3',
-            parentID: 'parent-rb',
-            title: 'Worker Three',
-          },
-        },
-      });
-
-      await manager.onSessionStatus({
-        type: 'session.status',
-        properties: {
-          sessionID: 'rb-1',
-          status: { type: 'idle' },
-        },
-      });
-
-      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
-      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-2');
-      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-3');
-
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(5);
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        4,
-        'rb-2',
-        'Worker Two',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        5,
-        'rb-3',
-        'Worker Three',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-
-      await manager.onSessionStatus({
-        type: 'session.status',
-        properties: {
-          sessionID: 'rb-2',
-          status: { type: 'idle' },
-        },
-      });
-
-      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-2r');
-    });
-
     test('does not rebalance right-even-2col when close stays below threshold', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(ctx, {
@@ -603,10 +523,10 @@ describe('MultiplexerSessionManager', () => {
 
     test('deduplicates concurrent close requests for same session', async () => {
       const ctx = createMockContext();
-      const manager = new MultiplexerSessionManager(ctx, {
-        ...defaultMultiplexerConfig,
-        layout: 'right-binary-8',
-      });
+      const manager = new MultiplexerSessionManager(
+        ctx,
+        defaultMultiplexerConfig,
+      );
       const closeGate = createDeferred<boolean>();
 
       mockMultiplexer.spawnPane.mockResolvedValueOnce({
@@ -657,124 +577,25 @@ describe('MultiplexerSessionManager', () => {
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-dup');
     });
 
-    test('waits for right-binary rebalance before spawning new session', async () => {
-      const ctx = createMockContext();
-      const manager = new MultiplexerSessionManager(ctx, {
-        ...defaultMultiplexerConfig,
-        layout: 'right-binary-8',
-      });
-      const rebalanceCloseGate = createDeferred<boolean>();
-      const rebalanceCloseStarted = createDeferred<void>();
-
-      mockMultiplexer.spawnPane
-        .mockResolvedValueOnce({ success: true, paneId: 'p-1' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-2' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-3' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-2r' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-3r' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-4' });
-
-      mockMultiplexer.closePane.mockImplementation(async (paneId: string) => {
-        if (paneId === 'p-2') {
-          rebalanceCloseStarted.resolve();
-          await rebalanceCloseGate.promise;
-        }
-        return true;
-      });
-
-      await manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-1',
-            parentID: 'parent-rb',
-            title: 'Worker One',
-          },
-        },
-      });
-      await manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-2',
-            parentID: 'parent-rb',
-            title: 'Worker Two',
-          },
-        },
-      });
-      await manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-3',
-            parentID: 'parent-rb',
-            title: 'Worker Three',
-          },
-        },
-      });
-
-      const closeIdlePromise = manager.onSessionStatus({
-        type: 'session.status',
-        properties: {
-          sessionID: 'rb-1',
-          status: { type: 'idle' },
-        },
-      });
-
-      // [CUSTOM] Pause midway through rebalance, after closing the first survivor.
-      await rebalanceCloseStarted.promise;
-
-      const createDuringRebalancePromise = manager.onSessionCreated({
-        type: 'session.created',
-        properties: {
-          info: {
-            id: 'rb-4',
-            parentID: 'parent-rb',
-            title: 'Worker Four',
-          },
-        },
-      });
-
-      // [CUSTOM] New session should wait, not spawn while rebalance is in flight.
-      await Promise.resolve();
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(3);
-
-      rebalanceCloseGate.resolve(true);
-
-      await Promise.all([closeIdlePromise, createDuringRebalancePromise]);
-
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(6);
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        4,
-        'rb-2',
-        'Worker Two',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        5,
-        'rb-3',
-        'Worker Three',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        6,
-        'rb-4',
-        'Worker Four',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-    });
-
-    test('waits for right-even-2col threshold rebalance before spawning new session', async () => {
+    test('waits for right-even-2col close pipeline before spawning new session', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(ctx, {
         ...defaultMultiplexerConfig,
         layout: 'right-even-2col-4',
       });
-      const rebalanceCloseGate = createDeferred<boolean>();
-      const rebalanceCloseStarted = createDeferred<void>();
+      // [CUSTOM] 固定返回 busy，聚焦 close/spawn 串行与防抖联动行为。
+      ctx.client.session.status.mockResolvedValue({
+        data: {
+          're2-1': { type: 'busy' },
+          're2-2': { type: 'busy' },
+          're2-3': { type: 'busy' },
+          're2-4': { type: 'busy' },
+          're2-5': { type: 'busy' },
+          're2-6': { type: 'busy' },
+        },
+      });
+      const closeGate = createDeferred<boolean>();
+      const closeStarted = createDeferred<void>();
 
       mockMultiplexer.spawnPane
         .mockResolvedValueOnce({ success: true, paneId: 'p-1' })
@@ -782,16 +603,12 @@ describe('MultiplexerSessionManager', () => {
         .mockResolvedValueOnce({ success: true, paneId: 'p-3' })
         .mockResolvedValueOnce({ success: true, paneId: 'p-4' })
         .mockResolvedValueOnce({ success: true, paneId: 'p-5' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-2r' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-3r' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-4r' })
-        .mockResolvedValueOnce({ success: true, paneId: 'p-5r' })
         .mockResolvedValueOnce({ success: true, paneId: 'p-6' });
 
       mockMultiplexer.closePane.mockImplementation(async (paneId: string) => {
-        if (paneId === 'p-2') {
-          rebalanceCloseStarted.resolve();
-          await rebalanceCloseGate.promise;
+        if (paneId === 'p-1') {
+          closeStarted.resolve();
+          await closeGate.promise;
         }
         return true;
       });
@@ -855,10 +672,10 @@ describe('MultiplexerSessionManager', () => {
         },
       });
 
-      // [CUSTOM] Pause midway through rebalance, after closing the first survivor.
-      await rebalanceCloseStarted.promise;
+      // [CUSTOM] 在 closePane 流水线进行中触发新建，验证其被串行等待。
+      await closeStarted.promise;
 
-      const createDuringRebalancePromise = manager.onSessionCreated({
+      const createDuringClosePromise = manager.onSessionCreated({
         type: 'session.created',
         properties: {
           info: {
@@ -869,45 +686,17 @@ describe('MultiplexerSessionManager', () => {
         },
       });
 
-      // [CUSTOM] New session should wait, not spawn while rebalance is in flight.
+      // [CUSTOM] close 未结束前，不应抢先 spawn 新 pane。
       await Promise.resolve();
       expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(5);
 
-      rebalanceCloseGate.resolve(true);
+      closeGate.resolve(true);
 
-      await Promise.all([closeIdlePromise, createDuringRebalancePromise]);
+      await Promise.all([closeIdlePromise, createDuringClosePromise]);
 
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(10);
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(6);
       expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
         6,
-        're2-2',
-        'Worker Two',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        7,
-        're2-3',
-        'Worker Three',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        8,
-        're2-4',
-        'Worker Four',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        9,
-        're2-5',
-        'Worker Five',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        10,
         're2-6',
         'Worker Six',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
@@ -915,11 +704,22 @@ describe('MultiplexerSessionManager', () => {
       );
     });
 
-    test('waits for scheduled right-even-2col threshold debounce rebalance before spawning', async () => {
+    test('cancels scheduled right-even-2col threshold rebalance when spawn quickly restores >4', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(ctx, {
         ...defaultMultiplexerConfig,
         layout: 'right-even-2col-4',
+      });
+      // [CUSTOM] 避免轮询兜底在防抖窗口内误回收，聚焦阈值取消逻辑本身。
+      ctx.client.session.status.mockResolvedValue({
+        data: {
+          're2-1': { type: 'busy' },
+          're2-2': { type: 'busy' },
+          're2-3': { type: 'busy' },
+          're2-4': { type: 'busy' },
+          're2-5': { type: 'busy' },
+          're2-6': { type: 'busy' },
+        },
       });
 
       mockMultiplexer.spawnPane
@@ -1004,49 +804,24 @@ describe('MultiplexerSessionManager', () => {
         },
       });
 
-      // [CUSTOM] 防抖窗口期间不应立刻新增 pane。
+      // [CUSTOM] 防抖窗口内若马上补回 >4，应取消待执行重建并直接新增 pane。
       await Promise.resolve();
       await new Promise((resolve) => setTimeout(resolve, 120));
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(5);
-
-      await Promise.all([closeIdlePromise, createDuringDebouncePromise]);
-
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(10);
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        6,
-        're2-2',
-        'Worker Two',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        7,
-        're2-3',
-        'Worker Three',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        8,
-        're2-4',
-        'Worker Four',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        9,
-        're2-5',
-        'Worker Five',
-        `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
-        '/test/directory',
-      );
-      expect(mockMultiplexer.spawnPane).toHaveBeenNthCalledWith(
-        10,
+      // [CUSTOM] 新会话将数量补回 >4 时，应直接跳过待执行重建并立即新增 pane。
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(6);
+      expect(mockMultiplexer.spawnPane).toHaveBeenLastCalledWith(
         're2-6',
         'Worker Six',
         `http://localhost:${process.env.OPENCODE_PORT ?? '4096'}/`,
         '/test/directory',
       );
+
+      await Promise.all([closeIdlePromise, createDuringDebouncePromise]);
+
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(6);
+      // [CUSTOM] 不应触发 5->4 的整批 close+respawn 重建。
+      expect(mockMultiplexer.closePane).toHaveBeenCalledTimes(1);
+      expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p-1');
     });
 
     test('does nothing on busy for unknown session', async () => {
@@ -1124,9 +899,13 @@ describe('MultiplexerSessionManager', () => {
         ctx,
         defaultMultiplexerConfig,
       );
+      const spawnStarted = createDeferred<void>();
       const deferred = createDeferred<{ success: true; paneId: string }>();
 
-      mockMultiplexer.spawnPane.mockImplementationOnce(() => deferred.promise);
+      mockMultiplexer.spawnPane.mockImplementationOnce(async () => {
+        spawnStarted.resolve();
+        return deferred.promise;
+      });
 
       const createPromise = manager.onSessionCreated({
         type: 'session.created',
@@ -1139,6 +918,8 @@ describe('MultiplexerSessionManager', () => {
           },
         },
       });
+
+      await spawnStarted.promise;
 
       await manager.onSessionStatus({
         type: 'session.status',
@@ -1186,15 +967,19 @@ describe('MultiplexerSessionManager', () => {
       expect(mockMultiplexer.closePane).toHaveBeenCalledWith('p2');
     });
 
-    test('clears spawning sessions during cleanup', async () => {
+    test('handles recreate during cleanup while spawn is still in progress', async () => {
       const ctx = createMockContext();
       const manager = new MultiplexerSessionManager(
         ctx,
         defaultMultiplexerConfig,
       );
 
+      const spawnStarted = createDeferred<void>();
       const deferred = createDeferred<{ success: true; paneId: string }>();
-      mockMultiplexer.spawnPane.mockImplementationOnce(() => deferred.promise);
+      mockMultiplexer.spawnPane.mockImplementationOnce(async () => {
+        spawnStarted.resolve();
+        return deferred.promise;
+      });
       const event = {
         type: 'session.created',
         properties: {
@@ -1208,16 +993,17 @@ describe('MultiplexerSessionManager', () => {
 
       const createPromise = manager.onSessionCreated(event);
 
-      await Promise.resolve();
+      await spawnStarted.promise;
 
       await manager.cleanup();
 
-      await manager.onSessionCreated(event);
+      const secondCreatePromise = manager.onSessionCreated(event);
 
       deferred.resolve({ success: true, paneId: 'p-cleanup' });
-      await createPromise;
+      await Promise.all([createPromise, secondCreatePromise]);
 
-      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(2);
+      // [CUSTOM] 同 session 在 in-flight spawn 完成后保持去重，避免重复开 pane。
+      expect(mockMultiplexer.spawnPane).toHaveBeenCalledTimes(1);
     });
   });
 });

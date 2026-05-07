@@ -206,7 +206,6 @@ bunx oh-my-opencode-slim@latest install --reset
 |---|---|---|
 | `main-vertical` | 主 pane 在左，子 pane 在右堆叠 | 通用默认 |
 | `main-horizontal` | 主 pane 在上，子 pane 在下堆叠 | 宽屏/横向工作流 |
-| `right-binary-8` | 左右固定 `1/2`；右侧 `1→2→4→8` 递进分裂 | 需要“二叉扩展”结构感 |
 | `right-even-8` | 左右固定 `1/2`；右侧单列均分 | 稳定+均分优先 |
 | `right-even-2col-4` | 左右固定 `1/2`；`1-4` 保持田字（`3` 上二下一，`4` 2x2）；`4→5` 触发一次单列均分重构，`5-8` 后续继续纵向堆叠；回落到 `<5` 时再触发一次重构回田字 | 阈值触发策略 |
 | `tiled` | 全部 pane 网格均分 | 最大并行可视化 |
@@ -215,9 +214,9 @@ bunx oh-my-opencode-slim@latest install --reset
 
 补充：
 
-- `right-binary-8` / `right-even-8` / `right-even-2col-4`
+- `right-even-8` / `right-even-2col-4`
   不使用 `panel_rows_per_column`。
-- 这三个 `right-*` 布局可见 pane 上限固定 `8`
+- 这两个 `right-*` 布局可见 pane 上限固定 `8`
   （同时仍受 `max_panel_panes` 约束）。
 
 ---
